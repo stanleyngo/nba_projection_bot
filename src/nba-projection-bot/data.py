@@ -15,8 +15,6 @@ from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.library.parameters import SeasonTypePlayoffs
 
-# Map friendly stat names -> nba_api game-log dataframe column names.
-# Extend this as you support more props.
 STAT_COLUMNS = {
     "points": "PTS",
     "rebounds": "REB",
@@ -100,8 +98,6 @@ def get_recent_stats(
 
 
 if __name__ == "__main__":
-    # Stage 1 checkpoint — run `python -m nba_prop_sim.data` (from src/) to test.
-    # Confirm you get a list of real numbers before moving to simulation.py.
     recent = get_recent_stats("Jokic", ["points", "rebounds"], n_games=15, season="2025-26")
     print("Recent points:", recent)
     print("Games returned:", len(recent.get("points", [])))
