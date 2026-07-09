@@ -44,55 +44,56 @@ def resolve_player_id(player_name: str) -> int | None:
     return matches[0]["id"]
 
 
-def get_recent_stat_values(
+def get_recent_stats(
     player_name: str,
-    stat: str,
+    stats: list[str],
     n_games: int = 15,
-    season: str = "1989-90",
-) -> list[int]:
+    season: str = "2025-26",
+) -> dict[str, list[int]]:
     """
-    Return a player's values for `stat` over their most recent `n_games`,
-    combining regular season and playoff games.
+    Return a player's values for each stat in `stats` over their most recent
+    `n_games`, combining regular season and playoff games.
 
-    Raises ValueError if the stat is unsupported or the player isn't found.
+    Raises ValueError if a stat is unsupported or the player isn't found.
     """
-    stat = stat.lower()
-    if stat not in STAT_COLUMNS:
+    stats = [s.lower() for s in stats]
+    unknown = [s for s in stats if s not in STAT_COLUMNS]
+    if unknown:
         raise ValueError(
-            f"Unsupported stat '{stat}'. Supported: {list(STAT_COLUMNS)}"
+            f"Unsupported stat(s) {unknown}. Supported: {list(STAT_COLUMNS)}"
         )
 
     player_id = resolve_player_id(player_name)
     if player_id is None:
         raise ValueError(f"Player '{player_name}' not found")
 
-    column = STAT_COLUMNS[stat]
-
     # playergamelog always returns a whole season per call — there's no way to
     # ask it for fewer games. So this loop isn't about limiting fetch size; it
     # walks backward season by season because n_games can exceed what a single
     # season (even with playoffs) contains, e.g. a long-career player's request
     # for more games than they played that season.
-    values: list[int] = []
+    values: dict[str, list[int]] = {stat: [] for stat in stats}
     current_season = season
-    while len(values) < n_games:
+    while len(values[stats[0]]) < n_games:
         found_this_season = False
         for season_type in (SeasonTypePlayoffs.playoffs, SeasonTypePlayoffs.regular):
-            if len(values) >= n_games:
+            if len(values[stats[0]]) >= n_games:
                 break  # playoffs alone covered it — skip the regular-season call
             log = playergamelog.PlayerGameLog(
                 player_id=player_id, season=current_season, season_type_all_star=season_type
             )
             df = log.get_data_frames()[0]
             found_this_season = found_this_season or not df.empty
-            remaining = n_games - len(values)
-            values.extend(int(v) for v in df[column].head(remaining))
+            remaining = n_games - len(values[stats[0]])
+            sliced = df.head(remaining)
+            for stat in stats:
+                values[stat].extend(int(v) for v in sliced[STAT_COLUMNS[stat]])
 
         if not found_this_season:
             break  # no data this season or earlier — before the player's career
         current_season = _season_before(current_season)
 
-    if not values:
+    if not values[stats[0]]:
         raise ValueError(f"No games found for {player_name} in or before {season}")
 
     return values
@@ -101,6 +102,6 @@ def get_recent_stat_values(
 if __name__ == "__main__":
     # Stage 1 checkpoint — run `python -m nba_prop_sim.data` (from src/) to test.
     # Confirm you get a list of real numbers before moving to simulation.py.
-    recent = get_recent_stat_values("Michael Jordan", "points", n_games=100)
+    recent = get_recent_stats("Jokic", ["points", "rebounds"], n_games=15, season="2025-26")
     print("Recent points:", recent)
-    print("Games returned:", len(recent))
+    print("Games returned:", len(recent.get("points", [])))
