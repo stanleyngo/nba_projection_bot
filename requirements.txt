@@ -1,0 +1,15 @@
+# data + simulation
+nba_api
+numpy
+pandas
+
+# LLM agent
+anthropic
+
+# API + UI
+fastapi
+uvicorn
+streamlit
+
+# Config
+python-dotenv
