@@ -90,8 +90,10 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
 
 @register_tool(
     "project_stat_over_line",
-    "Project the probability of a player exceeding a given stat line in the "
-    "next game based on recent performance.",
+    "Project a player's next-game performance for one stat. If a line is "
+    "given, returns the probability of exceeding/falling under it (plus "
+    "push probability); if no line is given, returns just the general "
+    "projected mean/median with no line comparison.",
     {
         "type": "object",
         "properties": {
@@ -101,7 +103,15 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
                 "enum": list(data.STAT_COLUMNS),
                 "description": "The stat name to project (e.g., 'points').",
             },
-            "line": {"type": "number", "description": "The stat line to compare against (e.g., 22.5)."},
+            "line": {
+                "type": "number",
+                "description": (
+                    "The stat line to compare against (e.g., 22.5). Optional — "
+                    "omit this for a general projection with no over/under "
+                    "comparison (e.g. 'what will he score' rather than 'will "
+                    "he go over 25.5')."
+                ),
+            },
             "n_games": {
                 "type": "integer",
                 "minimum": 1,
@@ -109,14 +119,14 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
                 "description": "The number of recent games to consider for the projection (default: 15).",
             },
         },
-        "required": ["player_name", "stat", "line"],
+        "required": ["player_name", "stat"],
     },
 )
 
-async def project_stat_over_line(player_name: str, stat: str, line: float, n_games: int = 15) -> dict:
+async def project_stat_over_line(player_name: str, stat: str, line: float | None = None, n_games: int = 15) -> dict:
     values_dict = await asyncio.to_thread(data.get_recent_stats, player_name, [stat], n_games=n_games)
     values = values_dict[stat.lower()]
-    return simulation.project_stat(values, line, n_simulations=10_000)
+    return simulation.project_stat(values, line)
 
 
 async def call_tool(name: str, tool_input: dict) -> dict:

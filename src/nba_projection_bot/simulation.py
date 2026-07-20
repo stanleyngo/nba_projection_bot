@@ -91,14 +91,21 @@ def fit_count_model(
 
 def project_stat(
     values: list[int],
-    line: float,
+    line: float | None = None,
     half_life: float | None = None,
 ) -> dict:
     """
     Fit a count model to `values` (optionally recency-weighted via `half_life`)
-    and summarize it against a prop `line` (e.g. 22.5 points).
+    and, if `line` is given, summarize it against that prop line (e.g. 22.5 points).
 
-    Returns a dict with: mean, median, prob_over, prob_under, prob_push, model.
+    Returns a dict with: mean, median, model — plus prob_over, prob_under,
+    prob_push when `line` was provided.
+
+    `line` is optional by design: this keeps a single function (and a single
+    tool schema entry) serving both "what will he score" (no line — just the
+    fitted distribution) and "will he go over 25.5" (line given — full
+    probability breakdown), rather than needing a separate no-line variant
+    duplicated per model as more simulation methods are added.
 
     Probabilities are exact (from the fitted CDF/SF), so unlike the old bootstrap
     they are never hard 0/1 just because the value wasn't seen in the sample. For
@@ -111,21 +118,21 @@ def project_stat(
     weights = recency_weights(len(values), half_life)
     dist, model = fit_count_model(values, weights)
 
-    # Over the line means strictly greater: X >= floor(line) + 1 == sf(floor(line)).
-    prob_over = float(dist.sf(math.floor(line)))
-    # Under the line means strictly less: X <= ceil(line) - 1 == cdf(ceil(line) - 1).
-    prob_under = float(dist.cdf(math.ceil(line) - 1))
-    # A push only exists when the line is an integer the stat can land on exactly.
-    prob_push = float(dist.pmf(int(line))) if float(line).is_integer() else 0.0
-
-    return {
+    result = {
         "mean": float(dist.mean()),
         "median": float(dist.median()),
-        "prob_over": prob_over,
-        "prob_under": prob_under,
-        "prob_push": prob_push,
         "model": model,
     }
+
+    if line is not None:
+        # Over the line means strictly greater: X >= floor(line) + 1 == sf(floor(line)).
+        result["prob_over"] = float(dist.sf(math.floor(line)))
+        # Under the line means strictly less: X <= ceil(line) - 1 == cdf(ceil(line) - 1).
+        result["prob_under"] = float(dist.cdf(math.ceil(line) - 1))
+        # A push only exists when the line is an integer the stat can land on exactly.
+        result["prob_push"] = float(dist.pmf(int(line))) if float(line).is_integer() else 0.0
+
+    return result
 
 
 def simulate_stat(

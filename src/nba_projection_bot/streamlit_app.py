@@ -30,8 +30,10 @@ def ask_backend(question: str) -> str:
     """
     # 1. requests.post(API_URL, json={"question": question}, timeout=...).
     #    Remember api.py's own docstring: this can take several seconds
-    #    with multiple tool round-trips — don't set the timeout too short
-    #    (60 seconds is a reasonable floor).
+    #    with multiple tool round-trips — web_search specifically adds real
+    #    latency (server-side searches, possible pause_turn retries across
+    #    several loop iterations), so don't set the timeout too short
+    #    (120 seconds is a reasonable floor now that web search is in play).
     #
     # 2. Wrap the request in try/except requests.RequestException — this
     #    covers connection errors, timeouts, DNS failures, etc. (e.g. the
@@ -54,7 +56,7 @@ def ask_backend(question: str) -> str:
     # 4. On success, parse the JSON body and return its "answer" field
     #    (matches api.py's AskResponse model exactly).
     try:
-        response = requests.post(API_URL, json={"question": question}, timeout=60)
+        response = requests.post(API_URL, json={"question": question}, timeout=120)
         response.raise_for_status()
         data = response.json()
         return data["answer"]
