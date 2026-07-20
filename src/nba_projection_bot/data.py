@@ -24,6 +24,12 @@ STAT_COLUMNS = {
     "threes": "FG3M",
 }
 
+# Upper bound on n_games — without this, a large value means many
+# sequential nba_api calls (slow, risks getting rate-limited by
+# stats.nba.com) and a large tool result sent back to the LLM (inflates
+# input-token cost). 200 comfortably covers a couple of full seasons.
+MAX_N_GAMES = 200
+
 
 def _season_before(season: str) -> str:
     """"1989-90" -> "1988-89"."""
@@ -60,6 +66,8 @@ def get_recent_stats(
         raise ValueError(
             f"Unsupported stat(s) {unknown}. Supported: {list(STAT_COLUMNS)}"
         )
+    if not 1 <= n_games <= MAX_N_GAMES:
+        raise ValueError(f"n_games must be between 1 and {MAX_N_GAMES}, got {n_games}")
 
     player_id = resolve_player_id(player_name)
     if player_id is None:
