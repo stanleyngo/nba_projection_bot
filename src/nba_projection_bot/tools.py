@@ -2,12 +2,12 @@
 tools.py — Stage 3: wrap data.py / simulation.py as Anthropic tool-use tools.
 """
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import nba_projection_bot.data as data
 import nba_projection_bot.simulation as simulation
-
 
 @dataclass
 class ToolEntry:
@@ -15,10 +15,6 @@ class ToolEntry:
     input_schema: dict
     function: Callable
 
-
-# TOOL_REGISTRY maps tool name -> ToolEntry. Populated by the @register_tool
-# decorator below, not by hand — see it applied just above each tool
-# implementation further down this file.
 TOOL_REGISTRY: dict[str, ToolEntry] = {}
 
 
@@ -79,19 +75,23 @@ def get_tool_schemas() -> list[dict]:
             },
             "n_games": {
                 "type": "integer",
+                "minimum": 1,
+                "maximum": data.MAX_N_GAMES,
                 "description": "The number of recent games to consider (default: 15).",
             },
         },
         "required": ["player_name", "stats"],
     },
 )
-def get_player_recent_stats(player_name: str, stats: list[str], n_games: int = 15) -> dict:
-    return data.get_recent_stats(player_name, stats, n_games=n_games)
+
+async def get_player_recent_stats(player_name: str, stats: list[str], n_games: int = 15) -> dict:
+    return await asyncio.to_thread(data.get_recent_stats, player_name, stats, n_games=n_games)
 
 
 @register_tool(
     "project_stat_over_line",
-    "Project the probability of a player exceeding a given stat line in the next game based on recent performance.",
+    "Project the probability of a player exceeding a given stat line in the "
+    "next game based on recent performance.",
     {
         "type": "object",
         "properties": {
@@ -104,40 +104,35 @@ def get_player_recent_stats(player_name: str, stats: list[str], n_games: int = 1
             "line": {"type": "number", "description": "The stat line to compare against (e.g., 22.5)."},
             "n_games": {
                 "type": "integer",
+                "minimum": 1,
+                "maximum": data.MAX_N_GAMES,
                 "description": "The number of recent games to consider for the projection (default: 15).",
             },
         },
         "required": ["player_name", "stat", "line"],
     },
 )
-def project_stat_over_line(player_name: str, stat: str, line: float, n_games: int = 15) -> dict:
-    values_dict = data.get_recent_stats(player_name, [stat], n_games=n_games)
+
+async def project_stat_over_line(player_name: str, stat: str, line: float, n_games: int = 15) -> dict:
+    values_dict = await asyncio.to_thread(data.get_recent_stats, player_name, [stat], n_games=n_games)
     values = values_dict[stat.lower()]
     return simulation.project_stat(values, line, n_simulations=10_000)
 
 
-def call_tool(name: str, tool_input: dict) -> dict:
+async def call_tool(name: str, tool_input: dict) -> dict:
     if name not in TOOL_REGISTRY:
         raise ValueError(f"Unrecognized tool name: {name}")
-    return TOOL_REGISTRY[name].function(**tool_input)
+    return await TOOL_REGISTRY[name].function(**tool_input)
 
 
-if __name__ == "__main__":
-    # Stage 3 checkpoint — run `python -m nba_projection_bot.tools` (from
-    # src/) once you've filled in the functions above. No API calls to
-    # Anthropic needed yet. Sanity check:
-    #   - get_tool_schemas() returns both tools, each with "name",
-    #     "description", "input_schema" — and NOT "function" (that key
-    #     should never leak into what would get sent to the Anthropic API).
-    #   - call_tool(...) returns a plain-Python-type dict you could safely
-    #     json.dumps().
+if __name__ == "__main__": 
     import json
 
     schemas = get_tool_schemas()
     print("registered tool schemas:", json.dumps(schemas, indent=2))
 
-    result = call_tool(
+    result = asyncio.run(call_tool(
         "project_stat_over_line",
         {"player_name": "Nikola Jokic", "stat": "points", "line": 25.5, "n_games": 15},
-    )
+    ))
     print("call_tool result:", json.dumps(result, indent=2))
