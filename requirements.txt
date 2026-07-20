@@ -2,6 +2,10 @@
 nba_api
 numpy
 pandas
+scipy
+
+# testing
+pytest
 
 # LLM agent
 anthropic
