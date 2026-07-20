@@ -2,6 +2,13 @@
 nba_api==1.11.4
 numpy==2.5.1
 pandas==3.0.3
+nba_api
+numpy
+pandas
+scipy
+
+# testing
+pytest
 
 # LLM agent
 anthropic==0.116.0
