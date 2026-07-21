@@ -16,6 +16,7 @@ than trusting a framework to do it for you.
 
 import asyncio
 import json
+import time
 
 import anthropic
 from dotenv import load_dotenv
@@ -76,15 +77,21 @@ async def run_agent(user_message: str) -> str:
     load_dotenv()
     anthropic_client = anthropic.AsyncAnthropic()
     messages = [{"role": "user", "content": user_message}]
-    for _ in range(MAX_TOOL_ITERATIONS):
+    for iteration in range(MAX_TOOL_ITERATIONS):
+        # TEMPORARY DIAGNOSTIC — remove once the timeout question is
+        # resolved. Times just the API call itself, so you can see whether
+        # slowness is one expensive call (e.g. a real web search) or many
+        # cheaper calls adding up (e.g. several pause_turn round-trips).
+        start = time.perf_counter()
         response = await anthropic_client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
-        
             tools=tools.get_tool_schemas() + [WEB_SEARCH_TOOL],
             messages=messages,
         )
+        elapsed = time.perf_counter() - start
+        print(f"[iteration {iteration}] {elapsed:.2f}s, stop_reason={response.stop_reason}")
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason == "pause_turn":
             continue
