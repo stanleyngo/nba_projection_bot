@@ -18,48 +18,26 @@ import streamlit as st
 API_URL = "http://127.0.0.1:8000/ask"
 
 
-def ask_backend(question: str) -> str:
+def ask_backend(question: str, conversation_id: int | None) -> tuple[str, int]:
     """
-    POST `question` to the FastAPI backend's /ask endpoint and return the
-    answer string.
+    POST `question` (and `conversation_id`, if this continues an existing
+    conversation) to the FastAPI backend's /ask endpoint. Returns
+    (answer, conversation_id) — pass that conversation_id into the next
+    call to keep the same conversation going; the backend creates a new
+    one and hands back its id when conversation_id is None.
 
     Raises RuntimeError with a clean message on any failure — connection
     issues, a non-2xx response, or an unexpected response shape — so the
     caller (the UI code below) has exactly one exception type to handle,
     regardless of what actually went wrong underneath.
     """
-    # 1. requests.post(API_URL, json={"question": question}, timeout=...).
-    #    Remember api.py's own docstring: this can take several seconds
-    #    with multiple tool round-trips — web_search specifically adds real
-    #    latency (server-side searches, possible pause_turn retries across
-    #    several loop iterations), so don't set the timeout too short
-    #    (120 seconds is a reasonable floor now that web search is in play).
-    #
-    # 2. Wrap the request in try/except requests.RequestException — this
-    #    covers connection errors, timeouts, DNS failures, etc. (e.g. the
-    #    API not running at all). On failure, raise RuntimeError with a
-    #    clear message, e.g. f"Could not reach the API: {e}".
-    #
-    # 3. Check whether the response was actually successful. If not:
-    #      - Try to pull the "detail" field out of the JSON body — that's
-    #        the clean error message every HTTPException in api.py's ask()
-    #        endpoint includes (400/500/502 all use this same shape).
-    #      - Raise RuntimeError with that detail message. Fall back to a
-    #        generic message if the body isn't parseable JSON for some
-    #        reason (a truly unexpected failure shouldn't itself crash
-    #        this function).
-    #    (response.raise_for_status() raises requests.HTTPError on a bad
-    #    status code — you can catch that alongside RequestException, or
-    #    check response.ok / response.status_code manually before calling
-    #    .json(). Either approach works; pick one.)
-    #
-    # 4. On success, parse the JSON body and return its "answer" field
-    #    (matches api.py's AskResponse model exactly).
     try:
-        response = requests.post(API_URL, json={"question": question}, timeout=120)
+        response = requests.post(API_URL,
+                                  json={"question": question, "conversation_id": conversation_id},
+                                    timeout=120)
         response.raise_for_status()
         data = response.json()
-        return data["answer"]
+        return data["answer"], data["conversation_id"]
     except requests.HTTPError as e:
         try:
             error_detail = response.json().get("detail", "Unknown error")
@@ -75,28 +53,11 @@ def ask_backend(question: str) -> str:
 
 st.title("NBA Prop Projection Bot")
 
-# 1. Initialize st.session_state.history to an empty list if it's not
-#    already there — same pattern as the reference file. This is what
-#    lets past Q&A pairs stick around across Streamlit's re-runs.
-#
-# 2. A text input for the user's question (st.text_input(...)).
-#
-# 3. A button (st.button(...)). Inside its `if`:
-#      a. Guard against an empty question — st.warning(...) and skip if
-#         so, same as the reference file.
-#      b. Wrap the actual call in st.spinner(...) — this can genuinely
-#         take a while (a real LLM doing multiple tool round-trips), so a
-#         loading indicator matters more here than in the toy reference.
-#      c. Call ask_backend(question) inside try/except RuntimeError:
-#           - On failure: st.error(str(e)).
-#           - On success: append (question, answer) to
-#             st.session_state.history.
-#
-# 4. Below that, loop over st.session_state.history (most recent first is
-#    a reasonable choice, but up to you) and display each question/answer
-#    pair with st.write(...) or similar.
 if "history" not in st.session_state:
     st.session_state.history = []
+
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = None
 st.session_state.question = st.text_input("Ask a question about NBA player projections:")
 if st.button("Submit"):
     if not st.session_state.question:
@@ -104,10 +65,13 @@ if st.button("Submit"):
     else:
         with st.spinner("Getting answer..."):
             try:
-                answer = ask_backend(st.session_state.question)
+                answer, st.session_state.conversation_id = ask_backend(st.session_state.question, st.session_state.conversation_id)
                 st.session_state.history.append((st.session_state.question, answer))
             except RuntimeError as e:
                 st.error(str(e))
+if st.button("New conversation"):
+    st.session_state.conversation_id = None
+    st.session_state.history = []
 for question, answer in reversed(st.session_state.history):
     st.write(f"**Q:** {question}")
     st.write(f"**A:** {answer}")

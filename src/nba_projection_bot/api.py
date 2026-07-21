@@ -10,21 +10,30 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 import nba_projection_bot.agent as agent
+import nba_projection_bot.db as db
 
 # Rate limiting by client IP — /ask triggers real, billed Anthropic API
 # calls (possibly several, per the agent's tool-use loop), so this caps
 # how fast any one client can spend your API budget.
 limiter = Limiter(key_func=get_remote_address)
 
-app = FastAPI()
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await db.init_db()
+    yield
+app = FastAPI(lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 class AskRequest(BaseModel):
     question: str = Field(max_length=500)
+    conversation_id: int | None = None
 
 class AskResponse(BaseModel):
     answer: str
+    conversation_id: int
 
 @app.get("/health")
 def health_check() -> dict:
@@ -34,7 +43,8 @@ def health_check() -> dict:
 @limiter.limit("5/minute")
 async def ask(request: Request, ask_request: AskRequest) -> AskResponse:
     try:
-        answer = await agent.run_agent(ask_request.question)
+        answer, conversation_id = await agent.run_agent(ask_request.question,
+                                                         ask_request.conversation_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -50,7 +60,7 @@ async def ask(request: Request, ask_request: AskRequest) -> AskResponse:
             detail="An unexpected error occurred. Please try again later.",
         )
 
-    return AskResponse(answer=answer)
+    return AskResponse(answer=answer, conversation_id=conversation_id)
 
 
 if __name__ == "__main__":
