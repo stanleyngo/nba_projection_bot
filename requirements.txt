@@ -2,13 +2,10 @@
 nba_api==1.11.4
 numpy==2.5.1
 pandas==3.0.3
-nba_api
-numpy
-pandas
-scipy
+scipy==1.11.4
 
 # testing
-pytest
+pytest==7.4.2
 
 # LLM agent
 anthropic==0.116.0
@@ -19,6 +16,9 @@ uvicorn==0.51.0
 streamlit==1.59.2
 requests==2.34.2
 slowapi==0.1.10
+
+# database
+sqlalchemy==2.0.22
 
 # Config
 python-dotenv==1.2.2

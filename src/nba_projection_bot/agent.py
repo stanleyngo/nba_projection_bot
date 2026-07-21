@@ -21,17 +21,12 @@ import time
 import anthropic
 from dotenv import load_dotenv
 
+import nba_projection_bot.db as db
 import nba_projection_bot.tools as tools
 
 MODEL = "claude-sonnet-4-5"
 MAX_TOKENS = 1024
 MAX_TOOL_ITERATIONS = 5
-
-WEB_SEARCH_TOOL = {
-    "type": "web_search_20250305",
-    "name": "web_search",
-    "max_uses": 3,
-}
 
 SYSTEM_PROMPT = """You are an NBA player stat projection assistant. You help \
 users understand the likelihood of a player exceeding a given stat line \
@@ -65,18 +60,35 @@ projection tool, never from search results or your own estimate.
 - Standalone questions about a player's availability or injury status \
 (without a specific stat line) are also in scope — answer these using \
 web_search alone, without necessarily calling the projection tool.
+- Before giving any projection, always use web_search once to confirm the \
+season is currently active and a game is actually imminent — don't rely \
+on assumption, even if it seems obvious. The available data may be from \
+a prior season if it's currently the offseason or a long playoff gap. \
+Clearly state in your answer if the projection is based on a prior \
+season's data rather than an active, upcoming game.
 """
 
-async def run_agent(user_message: str) -> str:
+async def run_agent(user_message: str, conversation_id: int | None = None) -> tuple[str, int]:
     """
     Run one user turn through the agent loop: send `user_message` to the
-    model, resolve any tool calls it makes, and return its final text
+    model (with prior turns from `conversation_id` loaded as context, if
+    given), resolve any tool calls it makes, and return its final text
     response once it's done calling tools.
+
+    Returns (answer, conversation_id) — conversation_id is echoed back
+    (or newly created, if it was None) so the caller can pass it on the
+    NEXT call to keep the same conversation going. An HTTP request has no
+    memory of its own; this id is the only thing that ties separate
+    requests back into one conversation.
     """
 
     load_dotenv()
     anthropic_client = anthropic.AsyncAnthropic()
-    messages = [{"role": "user", "content": user_message}]
+
+    if conversation_id is None:
+        conversation_id = await db.create_conversation()
+    history = await db.load_history(conversation_id)
+    messages = history + [{"role": "user", "content": user_message}]
     for iteration in range(MAX_TOOL_ITERATIONS):
         # TEMPORARY DIAGNOSTIC — remove once the timeout question is
         # resolved. Times just the API call itself, so you can see whether
@@ -86,12 +98,20 @@ async def run_agent(user_message: str) -> str:
         response = await anthropic_client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=tools.get_tool_schemas() + [WEB_SEARCH_TOOL],
+            system=[{
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            tools=tools.get_tool_schemas(),
             messages=messages,
         )
         elapsed = time.perf_counter() - start
-        print(f"[iteration {iteration}] {elapsed:.2f}s, stop_reason={response.stop_reason}")
+        print(
+            f"[iteration {iteration}] {elapsed:.2f}s, stop_reason={response.stop_reason}, "
+            f"cache_creation_input_tokens={response.usage.cache_creation_input_tokens}, "
+            f"cache_read_input_tokens={response.usage.cache_read_input_tokens}"
+        )
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason == "pause_turn":
             continue
@@ -99,7 +119,10 @@ async def run_agent(user_message: str) -> str:
             text_blocks = [block for block in response.content if block.type == "text"]
             if not text_blocks:
                 raise ValueError("Expected at least one text block in the final response.")
-            return "\n\n".join(block.text for block in text_blocks)
+            answer = "\n\n".join(block.text for block in text_blocks)
+            await db.append_message(conversation_id, "user", user_message)
+            await db.append_message(conversation_id, "assistant", answer)
+            return answer, conversation_id
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
@@ -125,5 +148,8 @@ async def run_agent(user_message: str) -> str:
 
 
 if __name__ == "__main__":
+    # Once run_agent returns (answer, conversation_id), unpack both here —
+    # e.g. call it twice with the same conversation_id to sanity-check that
+    # the second call actually has memory of the first.
     reply = asyncio.run(run_agent("What's Nikola Jokic projected for against a 25.5 point line?"))
     print(reply)

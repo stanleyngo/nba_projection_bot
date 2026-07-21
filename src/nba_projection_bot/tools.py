@@ -17,6 +17,20 @@ class ToolEntry:
 
 TOOL_REGISTRY: dict[str, ToolEntry] = {}
 
+# WEB_SEARCH_TOOL is a SERVER-SIDE tool — Anthropic runs the actual search
+# on their own infrastructure, so unlike everything in TOOL_REGISTRY there's
+# no Python function behind it and it's never dispatched through call_tool.
+# It deliberately does NOT go through @register_tool/TOOL_REGISTRY (that
+# registry's whole shape assumes a backing function to call) — it's just
+# included directly in get_tool_schemas()'s returned list, so agent.py can
+# treat "every tool the model should see" as one call to that function
+# without needing to know this one exists as a special case.
+WEB_SEARCH_TOOL = {
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": 3,
+}
+
 
 def register_tool(name: str, description: str, input_schema: dict):
     """
@@ -48,7 +62,7 @@ def register_tool(name: str, description: str, input_schema: dict):
 
 def get_tool_schemas() -> list[dict]:
 
-    return [
+    custom_schemas = [
         {
             "name": name,
             "description": entry.description,
@@ -56,6 +70,7 @@ def get_tool_schemas() -> list[dict]:
         }
         for name, entry in TOOL_REGISTRY.items()
     ]
+    return custom_schemas + [WEB_SEARCH_TOOL]
 
 
 @register_tool(
