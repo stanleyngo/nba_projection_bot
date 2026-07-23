@@ -84,3 +84,62 @@ def test_walk_forward_grid_higher_lines_have_fewer_overs():
         return sum(outcomes)
 
     assert overs_at(+8) < overs_at(-8)
+
+
+# ---------------------------------------------------------------------------
+# combined-prop walk-forward
+# ---------------------------------------------------------------------------
+
+def test_walk_forward_combo_aligns_and_uses_combined_outcome():
+    # Two aligned stat series; the outcome must be decided by the COMBINED total
+    # (points + rebounds) against the trailing-median line of that combined series.
+    stat_values = {
+        "points": list(range(1, 21)),
+        "rebounds": list(range(1, 21)),
+    }
+
+    seen_lines = []
+
+    def predictor(history, line):
+        seen_lines.append(line)
+        # History is per-component and grows by one game each step.
+        assert set(history) == {"points", "rebounds"}
+        return 0.5
+
+    preds, outcomes = backtest.walk_forward_combo(
+        stat_values, min_history=5, predictor=predictor
+    )
+    assert len(preds) == len(outcomes) == 20 - 5
+    assert all(o in (0, 1) for o in outcomes)
+    # Combined totals rise monotonically (2,4,...,40), so early games sit below
+    # their trailing-median line (outcome 0) — the line tracks the combined series.
+    assert seen_lines and all(line > 0 for line in seen_lines)
+
+
+def test_walk_forward_combo_grid_expands_by_offsets():
+    stat_values = {"points": list(range(1, 21)), "rebounds": list(range(1, 21))}
+    offsets = (-6.0, 0.0, 6.0)
+
+    def predictor(history, line):
+        return 0.5
+
+    preds, outcomes = backtest.walk_forward_combo(
+        stat_values, min_history=5, predictor=predictor, offsets=offsets
+    )
+    assert len(preds) == len(outcomes) == (20 - 5) * len(offsets)
+
+
+def test_compare_combo_models_returns_scored_results():
+    # Enough games for a walk-forward; real predictors (no network — pure math).
+    rng = np.random.default_rng(0)
+    stat_values = {
+        "points": rng.integers(15, 35, size=40).tolist(),
+        "rebounds": rng.integers(5, 15, size=40).tolist(),
+        "assists": rng.integers(3, 12, size=40).tolist(),
+    }
+    results = backtest.compare_combo_models(stat_values, min_history=10)
+    assert set(results) == {"parametric", "bootstrap"}
+    for r in results.values():
+        assert r["n"] == 40 - 10
+        assert 0.0 <= r["brier"] <= 1.0
+        assert np.isfinite(r["log_loss"])
