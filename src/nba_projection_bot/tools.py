@@ -144,6 +144,52 @@ async def project_stat_over_line(player_name: str, stat: str, line: float | None
     return simulation.project_stat(values, line)
 
 
+@register_tool(
+    "project_combo_over_line",
+    "Project a player's next-game performance for a COMBINED prop — the sum of "
+    "two or more stats, e.g. points+rebounds+assists ('PRA'). If a line is "
+    "given, returns the probability of the combined total exceeding/falling "
+    "under it (plus push probability); if no line is given, returns just the "
+    "projected mean/median of the combined total. Use this instead of adding "
+    "up separate single-stat projections — it accounts for the correlation "
+    "between the stats within the same game.",
+    {
+        "type": "object",
+        "properties": {
+            "player_name": {"type": "string", "description": "The player's name (first, last, or full)."},
+            "stats": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": list(data.STAT_COLUMNS),
+                },
+                "minItems": 2,
+                "description": "The stats to combine, e.g. ['points', 'rebounds', 'assists'].",
+            },
+            "line": {
+                "type": "number",
+                "description": (
+                    "The combined stat line to compare against (e.g. 45.5). "
+                    "Optional — omit for a general projection with no "
+                    "over/under comparison."
+                ),
+            },
+            "n_games": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": data.MAX_N_GAMES,
+                "description": "The number of recent games to consider for the projection (default: 15).",
+            },
+        },
+        "required": ["player_name", "stats"],
+    },
+)
+
+async def project_combo_over_line(player_name: str, stats: list[str], line: float | None = None, n_games: int = 15) -> dict:
+    values_dict = await asyncio.to_thread(data.get_recent_stats, player_name, stats, n_games=n_games)
+    return simulation.project_combo_stat(values_dict, line)
+
+
 async def call_tool(name: str, tool_input: dict) -> dict:
     if name not in TOOL_REGISTRY:
         raise ValueError(f"Unrecognized tool name: {name}")

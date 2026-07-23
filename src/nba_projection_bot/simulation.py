@@ -135,6 +135,58 @@ def project_stat(
     return result
 
 
+def project_combo_stat(
+    stat_values: dict[str, list[int]],
+    line: float | None = None,
+    half_life: float | None = None,
+) -> dict:
+    """
+    Project a COMBINED prop — the per-game sum of several stats, e.g. PRA
+    (points + rebounds + assists) — against a line.
+
+    `stat_values` maps each component stat to its per-game values (most-recent-
+    first, all lists the SAME length because they come from the same games; see
+    data.get_recent_stats). We build the combined per-game total for each game
+    and fit the ordinary parametric count model to that single derived series.
+
+    Why sum-then-fit (rather than resample each stat and add): summing the
+    ACTUAL same-game values means the correlation between the components is
+    already baked into the combined series — a big scoring night that also
+    brought rebounds and assists shows up as one genuinely large total, and a
+    quiet night as one small total. Fitting the parametric model to that series
+    keeps real tails (P(combo > anything) is never a hard 0) exactly as the
+    single-stat engine does, with no new distribution math. The correlation-
+    preserving bootstrap (`simulate_combo_stat`) is kept only as a backtest
+    baseline, mirroring `simulate_stat` for single stats.
+
+    Returns the same dict as `project_stat` (mean, median, model, and the
+    prob_over/under/push breakdown when `line` is given) plus `stats` (the
+    component names) and `components` (each component's plain mean) for
+    explainability.
+    """
+    if not stat_values:
+        raise ValueError("stat_values dictionary is empty.")
+    if len(stat_values) < 2:
+        raise ValueError("A combo projection needs at least 2 stats.")
+
+    lengths = {stat: len(values) for stat, values in stat_values.items()}
+    n_games = next(iter(lengths.values()))
+    if any(length != n_games for length in lengths.values()):
+        raise ValueError(
+            f"All stat lists must have the same length; got {lengths}."
+        )
+    if n_games == 0:
+        raise ValueError("Cannot project from empty stat histories.")
+
+    combined = [int(sum(game)) for game in zip(*stat_values.values())]
+    result = project_stat(combined, line, half_life)
+    result["stats"] = list(stat_values)
+    result["components"] = {
+        stat: float(np.mean(values)) for stat, values in stat_values.items()
+    }
+    return result
+
+
 def simulate_stat(
     values: list[int],
     n_simulations: int = 10_000,
@@ -182,6 +234,25 @@ def simulate_multiple_stats(
             )
         simulated_stats[stat] = np.array(values)[random_indices].tolist()
     return simulated_stats
+
+
+def simulate_combo_stat(
+    stat_values: dict[str, list[int]],
+    n_simulations: int = 10_000,
+    seed: int | None = None,
+) -> np.ndarray:
+    """
+    Resample `n_simulations` combined totals (e.g. PRA) by drawing shared game
+    indices via `simulate_multiple_stats` and summing the components per draw,
+    so the cross-stat correlation is preserved.
+
+    NOTE: this is the correlation-preserving bootstrap BASELINE for combined
+    props — the analogue of `simulate_stat` for single stats. Prefer
+    `project_combo_stat` for actual projections; this is retained for the
+    backtest comparison (see backtest.py). Pass `seed` for reproducibility.
+    """
+    simulated = simulate_multiple_stats(stat_values, n_simulations, seed)
+    return np.sum([simulated[stat] for stat in stat_values], axis=0)
 
 
 if __name__ == "__main__":

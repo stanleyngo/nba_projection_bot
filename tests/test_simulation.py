@@ -80,6 +80,74 @@ def test_recency_weighting_shifts_mean_toward_recent_games():
 
 
 # ---------------------------------------------------------------------------
+# project_combo_stat
+# ---------------------------------------------------------------------------
+
+def test_combo_probs_are_valid_and_sum_to_one():
+    stat_values = {
+        "points": [22, 18, 25, 30, 19, 21, 27, 24, 20, 23],
+        "rebounds": [10, 12, 8, 14, 9, 11, 13, 7, 10, 12],
+        "assists": [7, 5, 9, 6, 8, 4, 10, 6, 7, 5],
+    }
+    out = simulation.project_combo_stat(stat_values, line=45)  # integer -> push possible
+    for key in ("prob_over", "prob_under", "prob_push"):
+        assert 0.0 <= out[key] <= 1.0
+    assert out["prob_over"] + out["prob_under"] + out["prob_push"] == pytest.approx(1.0)
+    assert out["stats"] == ["points", "rebounds", "assists"]
+    assert set(out["components"]) == {"points", "rebounds", "assists"}
+
+
+def test_combo_mean_matches_sum_of_component_means():
+    stat_values = {"points": [20, 30, 25], "rebounds": [10, 8, 12]}
+    out = simulation.project_combo_stat(stat_values)
+    assert out["mean"] == pytest.approx(sum(out["components"].values()), rel=1e-6)
+
+
+def test_combo_tail_beyond_observed_max_is_nonzero():
+    # Same parametric tail guarantee as single stats: max combined total here is
+    # 30+14=44 in one game, but P(> 60) must still be strictly positive.
+    stat_values = {
+        "points": [22, 18, 25, 30, 19, 21, 27, 24, 20, 23],
+        "rebounds": [10, 12, 8, 14, 9, 11, 13, 7, 10, 12],
+    }
+    out = simulation.project_combo_stat(stat_values, line=60)
+    assert out["prob_over"] > 0.0
+
+
+def test_combo_rejects_unequal_lengths():
+    with pytest.raises(ValueError):
+        simulation.project_combo_stat({"points": [20, 25, 30], "rebounds": [10, 12]})
+
+
+def test_combo_rejects_fewer_than_two_stats():
+    with pytest.raises(ValueError):
+        simulation.project_combo_stat({"points": [20, 25, 30]})
+
+
+def test_combo_captures_correlation_via_actual_sums():
+    # Perfectly anti-correlated components: each game totals 30 exactly, so the
+    # combined series has ZERO variance regardless of each stat's own spread.
+    # Summing the actual same-game values captures this; treating the stats as
+    # independent would not.
+    stat_values = {"points": [10, 20, 5, 25], "rebounds": [20, 10, 25, 5]}
+    combined = [30, 30, 30, 30]
+    assert float(np.var(combined)) == 0.0
+    out = simulation.project_combo_stat(stat_values, line=30)
+    # A constant series collapses to Poisson at the mean, with almost all mass on 30.
+    assert out["model"] == "poisson"
+    assert out["mean"] == pytest.approx(30.0, rel=1e-6)
+
+
+def test_simulate_combo_stat_is_reproducible_and_correlation_preserving():
+    stat_values = {"points": [10, 20, 5, 25], "rebounds": [20, 10, 25, 5]}
+    a = simulation.simulate_combo_stat(stat_values, n_simulations=500, seed=3)
+    b = simulation.simulate_combo_stat(stat_values, n_simulations=500, seed=3)
+    assert np.array_equal(a, b)
+    # Every game sums to 30, so every resampled combined total is exactly 30.
+    assert np.all(a == 30)
+
+
+# ---------------------------------------------------------------------------
 # reproducibility of the (retained) resampling helpers
 # ---------------------------------------------------------------------------
 
