@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import nba_projection_bot.data as data
+import nba_projection_bot.rag as rag
 import nba_projection_bot.simulation as simulation
 
 @dataclass
@@ -210,6 +211,29 @@ async def project_combo_over_line(player_name: str, stats: list[str], line: floa
     return simulation.project_combo_stat(values_dict, line, injury_status=injury_status)
 
 
+@register_tool(
+    "get_player_news_context",
+    "Retrieve the most relevant recent news snippets AND analyst/sportswriter "
+    "commentary about a player, for background/narrative color only. Returns "
+    "two separate lists — 'news' (reported facts) and 'analysis' (opinion/ "
+    "commentary) — which must be presented and framed differently, not "
+    "treated as equally factual. Each item is an object with 'text', 'url', "
+    "and 'title' — always cite the 'url' as a clickable link when presenting "
+    "that item, so the user can read the original source. This is NOT a "
+    "source of statistical data or projections — never use it in place of "
+    "project_stat_over_line, only alongside it.",
+    {
+        "type": "object",
+        "properties": {
+            "player_name": {"type": "string", "description": "The player's name (first, last, or full)."},
+        },
+        "required": ["player_name"],
+    },
+)
+async def get_player_news_context(player_name: str) -> dict:
+    return await rag.get_relevant_context(player_name)
+
+
 async def call_tool(name: str, tool_input: dict) -> dict:
     if name not in TOOL_REGISTRY:
         raise ValueError(f"Unrecognized tool name: {name}")
@@ -227,3 +251,5 @@ if __name__ == "__main__":
         {"player_name": "Nikola Jokic", "stat": "points", "line": 25.5, "n_games": 15},
     ))
     print("call_tool result:", json.dumps(result, indent=2))
+
+    print("rag results:", asyncio.run(get_player_news_context("Nikola Jokic")))

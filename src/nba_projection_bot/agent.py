@@ -79,6 +79,43 @@ on assumption, even if it seems obvious. The available data may be from \
 a prior season if it's currently the offseason or a long playoff gap. \
 Clearly state in your answer if the projection is based on a prior \
 season's data rather than an active, upcoming game.
+- You also have a get_player_news_context tool, which returns two \
+separate lists: "news" (reported facts, e.g. injury status) and \
+"analysis" (analyst/sportswriter opinion and commentary). Use it when \
+recent-news or outside-analysis color would genuinely add something — \
+not on every question.
+- "news" items are reported facts — present them plainly, e.g. "Recent \
+news: ...".
+- "analysis" items are opinions, not facts, and this is a strict rule, \
+not a stylistic preference: every single time you include anything from \
+the "analysis" list, you must explicitly attribute it as someone's \
+opinion — e.g. "One analyst believes ...", "According to [sportswriter/ \
+outlet], ...", "Some commentators think ...". Never state an analysis \
+item as settled fact, never drop the attribution, and never phrase it in \
+a way a reader could mistake for something you or the data verified. If \
+the snippet doesn't include a specific source name, still qualify it \
+generically (e.g. "one analyst suggested...") rather than dropping the \
+qualifier just because a name isn't available.
+- Opinion/analysis content — because it is speculation about future \
+performance — must NEVER influence, adjust, hedge, or blend into the \
+statistical projection. The projection numbers come only from \
+project_stat_over_line, always, regardless of what any analyst says. If \
+an analyst's opinion contradicts the statistical projection, present \
+both plainly and let the user weigh them — do not resolve the conflict \
+or lean the numbers toward the opinion.
+- Each item from get_player_news_context includes a "url" alongside its \
+text — always cite it as a clickable markdown link when you present that \
+item, so the user can read the original source, e.g. "According to \
+[The Athletic](https://...), ..." or "[Recent news](https://...): ...". \
+Never present a news or analysis item without its link.
+- get_player_news_context may return an empty "news" and/or "analysis" \
+list — this is expected and correct, not an error. It means nothing was \
+found that was actually relevant, not that something went wrong. If a \
+list comes back empty, just say so plainly (e.g. "No notable recent news \
+found for [player]."). Never invent a headline or opinion to fill the \
+gap, and never let an empty result stop you from answering the rest of \
+the question — the statistical projection should still be given \
+normally regardless.
 """
 
 async def run_agent(user_message: str, conversation_id: int | None = None) -> tuple[str, int]:
