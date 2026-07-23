@@ -145,6 +145,17 @@ def bootstrap_predictor(history: list[int], line: float) -> float:
     return float(np.mean(sims > line))
 
 
+def parametric_combo_predictor(history: dict[str, list[int]], line: float) -> float:
+    """P(over) for a combined prop from the fitted count model on the summed series."""
+    return simulation.project_combo_stat(history, line)["prob_over"]
+
+
+def bootstrap_combo_predictor(history: dict[str, list[int]], line: float) -> float:
+    """P(over) for a combined prop from the correlation-preserving bootstrap baseline."""
+    sims = simulation.simulate_combo_stat(history, n_simulations=10_000, seed=0)
+    return float(np.mean(sims > line))
+
+
 def compare_models(
     values: list[int],
     min_history: int = 10,
@@ -167,6 +178,69 @@ def compare_models(
             preds, outcomes = walk_forward_grid(values, min_history, predictor, offsets)
         else:
             preds, outcomes = walk_forward(values, min_history, predictor)
+        results[name] = {
+            "n": len(preds),
+            "brier": brier_score(preds, outcomes),
+            "log_loss": log_loss(preds, outcomes),
+            "calibration": calibration_curve(preds, outcomes, n_bins=10),
+        }
+    return results
+
+
+def walk_forward_combo(
+    stat_values: dict[str, list[int]],
+    min_history: int,
+    predictor: Callable[[dict[str, list[int]], float], float],
+    offsets: tuple[float, ...] | None = None,
+    base_fn: Callable[[list[int]], float] = trailing_median_line,
+) -> tuple[list[float], list[int]]:
+    """
+    Walk-forward replay for a COMBINED prop. `stat_values` maps each component
+    stat to its CHRONOLOGICAL (oldest-first) per-game values, all the same
+    length. At each game with enough history, the line is set from the trailing
+    history of the COMBINED total; the predictor is asked for P(over) given the
+    per-component histories, and the realized combined total decides the outcome.
+
+    With `offsets` given, evaluates a grid of lines around the base per game
+    (like `walk_forward_grid`); otherwise a single trailing-median line.
+    """
+    stats = list(stat_values)
+    n_games = len(stat_values[stats[0]])
+    if any(len(stat_values[s]) != n_games for s in stats):
+        raise ValueError("All stat lists must have the same length.")
+    combined = [int(sum(game)) for game in zip(*(stat_values[s] for s in stats))]
+
+    grid = offsets if offsets else (0.0,)
+    preds: list[float] = []
+    outcomes: list[int] = []
+    for t in range(min_history, n_games):
+        history = {s: stat_values[s][:t] for s in stats}
+        actual = combined[t]
+        base = base_fn(combined[:t])
+        for offset in grid:
+            line = base + offset
+            preds.append(float(predictor(history, line)))
+            outcomes.append(1 if actual > line else 0)
+    return preds, outcomes
+
+
+def compare_combo_models(
+    stat_values: dict[str, list[int]],
+    min_history: int = 10,
+    offsets: tuple[float, ...] | None = None,
+) -> dict:
+    """
+    Run the combo walk-forward for both predictors (parametric summed-series vs
+    correlation-preserving bootstrap) over the same games and return their
+    Brier / log-loss scores plus calibration curves — the combined-prop analogue
+    of `compare_models`.
+    """
+    results = {}
+    for name, predictor in (
+        ("parametric", parametric_combo_predictor),
+        ("bootstrap", bootstrap_combo_predictor),
+    ):
+        preds, outcomes = walk_forward_combo(stat_values, min_history, predictor, offsets)
         results[name] = {
             "n": len(preds),
             "brier": brier_score(preds, outcomes),
@@ -206,6 +280,10 @@ def main(argv: list[str] | None = None) -> None:
                         help="Player name (default: Nikola Jokic).")
     parser.add_argument("--stat", default="points",
                         help="Stat to backtest (default: points).")
+    parser.add_argument("--combo", type=lambda s: [x.strip() for x in s.split(",") if x.strip()],
+                        default=None,
+                        help="Backtest a COMBINED prop instead of --stat: a comma-separated "
+                             "list of stats to sum, e.g. --combo points,rebounds,assists.")
     parser.add_argument("--n-games", type=int, default=80,
                         help="How many recent games to pull (default: 80).")
     parser.add_argument("--min-history", type=int, default=10,
@@ -224,16 +302,27 @@ def main(argv: list[str] | None = None) -> None:
     if args.grid and offsets is None:
         offsets = DEFAULT_OFFSETS
 
-    recent = data.get_recent_stats(
-        args.player, [args.stat], n_games=args.n_games, season=args.season
-    )
-    # data returns most-recent-first; the walk-forward wants oldest-first.
-    chronological = list(reversed(recent[args.stat.lower()]))
-
     mode = f"grid offsets={offsets}" if offsets else "single trailing-median line"
-    print(f"{args.player} - {args.stat}: {len(chronological)} games | {mode}\n")
 
-    results = compare_models(chronological, min_history=args.min_history, offsets=offsets)
+    if args.combo:
+        recent = data.get_recent_stats(
+            args.player, args.combo, n_games=args.n_games, season=args.season
+        )
+        # data returns most-recent-first; the walk-forward wants oldest-first.
+        chronological = {s.lower(): list(reversed(recent[s.lower()])) for s in args.combo}
+        n = len(next(iter(chronological.values())))
+        label = "+".join(args.combo)
+        print(f"{args.player} - {label} (combo): {n} games | {mode}\n")
+        results = compare_combo_models(chronological, min_history=args.min_history, offsets=offsets)
+    else:
+        recent = data.get_recent_stats(
+            args.player, [args.stat], n_games=args.n_games, season=args.season
+        )
+        # data returns most-recent-first; the walk-forward wants oldest-first.
+        chronological = list(reversed(recent[args.stat.lower()]))
+        print(f"{args.player} - {args.stat}: {len(chronological)} games | {mode}\n")
+        results = compare_models(chronological, min_history=args.min_history, offsets=offsets)
+
     _print_report(results)
 
     lower_brier = min(results, key=lambda k: results[k]["brier"])

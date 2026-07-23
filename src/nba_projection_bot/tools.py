@@ -134,15 +134,81 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
                 "maximum": data.MAX_N_GAMES,
                 "description": "The number of recent games to consider for the projection (default: 15).",
             },
+            "injury_status": {
+                "type": "string",
+                "enum": list(simulation.INJURY_FACTORS),
+                "description": (
+                    "The player's official injury designation for the upcoming "
+                    "game, as found via web_search — it scales the projection "
+                    "(questionable/doubtful lower it; 'out' voids it). Omit if "
+                    "the player is healthy or the status is unknown."
+                ),
+            },
         },
         "required": ["player_name", "stat"],
     },
 )
 
-async def project_stat_over_line(player_name: str, stat: str, line: float | None = None, n_games: int = 15) -> dict:
+async def project_stat_over_line(player_name: str, stat: str, line: float | None = None, n_games: int = 15, injury_status: str | None = None) -> dict:
     values_dict = await asyncio.to_thread(data.get_recent_stats, player_name, [stat], n_games=n_games)
     values = values_dict[stat.lower()]
-    return simulation.project_stat(values, line)
+    return simulation.project_stat(values, line, injury_status=injury_status)
+
+
+@register_tool(
+    "project_combo_over_line",
+    "Project a player's next-game performance for a COMBINED prop — the sum of "
+    "two or more stats, e.g. points+rebounds+assists ('PRA'). If a line is "
+    "given, returns the probability of the combined total exceeding/falling "
+    "under it (plus push probability); if no line is given, returns just the "
+    "projected mean/median of the combined total. Use this instead of adding "
+    "up separate single-stat projections — it accounts for the correlation "
+    "between the stats within the same game.",
+    {
+        "type": "object",
+        "properties": {
+            "player_name": {"type": "string", "description": "The player's name (first, last, or full)."},
+            "stats": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": list(data.STAT_COLUMNS),
+                },
+                "minItems": 2,
+                "description": "The stats to combine, e.g. ['points', 'rebounds', 'assists'].",
+            },
+            "line": {
+                "type": "number",
+                "description": (
+                    "The combined stat line to compare against (e.g. 45.5). "
+                    "Optional — omit for a general projection with no "
+                    "over/under comparison."
+                ),
+            },
+            "n_games": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": data.MAX_N_GAMES,
+                "description": "The number of recent games to consider for the projection (default: 15).",
+            },
+            "injury_status": {
+                "type": "string",
+                "enum": list(simulation.INJURY_FACTORS),
+                "description": (
+                    "The player's official injury designation for the upcoming "
+                    "game, as found via web_search — it scales the combined "
+                    "projection (questionable/doubtful lower it; 'out' voids it). "
+                    "Omit if the player is healthy or the status is unknown."
+                ),
+            },
+        },
+        "required": ["player_name", "stats"],
+    },
+)
+
+async def project_combo_over_line(player_name: str, stats: list[str], line: float | None = None, n_games: int = 15, injury_status: str | None = None) -> dict:
+    values_dict = await asyncio.to_thread(data.get_recent_stats, player_name, stats, n_games=n_games)
+    return simulation.project_combo_stat(values_dict, line, injury_status=injury_status)
 
 
 @register_tool(
