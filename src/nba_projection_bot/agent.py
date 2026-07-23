@@ -62,6 +62,14 @@ explanation alongside the statistical projection (e.g. "he's projected \
 at 25.7 points, though he's currently listed questionable with an ankle \
 issue"). The statistical projection itself must still come only from the \
 projection tool, never from search results or your own estimate.
+- When web_search turns up an injury designation for the player you're \
+projecting (probable, questionable, doubtful, or out), pass it into the \
+projection tool's injury_status parameter so the numbers actually reflect \
+it — don't just mention the injury in prose while reporting a healthy \
+projection. If the player is out, the tool returns no projection (the prop \
+has no action); report that plainly rather than inventing a number. The \
+injury adjustment is a simple heuristic multiplier, so note that limitation \
+the same way you note the model's overall simplicity.
 - Standalone questions about a player's availability or injury status \
 (without a specific stat line) are also in scope — answer these using \
 web_search alone, without necessarily calling the projection tool.
