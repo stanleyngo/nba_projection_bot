@@ -52,9 +52,44 @@ def recency_weights(n: int, half_life: float | None = None) -> np.ndarray:
     return 0.5 ** (np.arange(n) / half_life)
 
 
+# Heuristic availability multipliers keyed by official NBA injury designation.
+# A factor scales a player's projected production down when he's dinged up; `out`
+# is a sentinel (None) meaning "no projection" — a prop on a player who doesn't
+# play has no action, so we void rather than emit a number. These constants are
+# a deliberate simplification (no injury-tagged historical data to fit against),
+# and are easy to tune here.
+INJURY_FACTORS: dict[str, float | None] = {
+    "healthy": 1.00,
+    "probable": 1.00,
+    "questionable": 0.90,
+    "doubtful": 0.55,
+    "out": None,
+}
+
+
+def injury_factor(status: str | None) -> float | None:
+    """
+    Map an injury designation to its production multiplier.
+
+    Returns 1.0 for no/blank status (no adjustment), the table factor for a
+    known designation, or None for "out" (the void sentinel — caller must skip
+    the projection). Raises ValueError on an unrecognized status so the caller
+    (and the LLM) is told to use a valid designation.
+    """
+    if status is None or status.strip() == "":
+        return 1.0
+    key = status.strip().lower()
+    if key not in INJURY_FACTORS:
+        raise ValueError(
+            f"Unknown injury status {status!r}. Valid: {list(INJURY_FACTORS)}"
+        )
+    return INJURY_FACTORS[key]
+
+
 def fit_count_model(
     values: list[int],
     weights: np.ndarray | None = None,
+    factor: float = 1.0,
 ) -> tuple[stats.rv_frozen, str]:
     """
     Fit a discrete count distribution to `values` by method of moments and return
@@ -63,6 +98,11 @@ def fit_count_model(
 
     If the (optionally weighted) sample variance exceeds the mean, fit a Negative
     Binomial; otherwise fall back to a Poisson.
+
+    `factor` scales both moments (mean *= factor, var *= factor) before fitting —
+    used to fold in an injury/availability adjustment. Scaling both preserves the
+    variance-to-mean ratio, so the overdispersion character (and the NB-vs-Poisson
+    choice) is unchanged; only the location shifts. Default 1.0 is a no-op.
     """
     if values is None or len(values) == 0:
         raise ValueError("Cannot fit a model to an empty list of values.")
@@ -76,6 +116,9 @@ def fit_count_model(
 
     mean = float(np.average(arr, weights=weights))
     var = float(np.average((arr - mean) ** 2, weights=weights))
+    # Fold in the availability adjustment; scaling both preserves var/mean.
+    mean *= factor
+    var *= factor
 
     # Overdispersed -> Negative Binomial. scipy's nbinom(n=r, p) has
     # mean = r*(1-p)/p and var = r*(1-p)/p**2; solving for our (mean, var) via
@@ -93,6 +136,7 @@ def project_stat(
     values: list[int],
     line: float | None = None,
     half_life: float | None = None,
+    injury_status: str | None = None,
 ) -> dict:
     """
     Fit a count model to `values` (optionally recency-weighted via `half_life`)
@@ -107,6 +151,12 @@ def project_stat(
     probability breakdown), rather than needing a separate no-line variant
     duplicated per model as more simulation methods are added.
 
+    `injury_status` (e.g. "questionable", "doubtful", "out") scales the projection
+    down via INJURY_FACTORS. A status of "out" short-circuits to a void result
+    ({"available": False, ...}) with no numbers, since a prop on a player who
+    doesn't play has no action. Omit it (or "healthy") for no adjustment, in which
+    case the returned dict is identical to the un-adjusted projection.
+
     Probabilities are exact (from the fitted CDF/SF), so unlike the old bootstrap
     they are never hard 0/1 just because the value wasn't seen in the sample. For
     an integer line the "push" (landing exactly on the line) carries real mass and
@@ -115,14 +165,30 @@ def project_stat(
     if values is None or len(values) == 0:
         raise ValueError("Cannot project from an empty list of values.")
 
+    factor = injury_factor(injury_status)
+    if factor is None:  # "out" — void, no projection
+        return {
+            "injury_status": "out",
+            "available": False,
+            "projection": None,
+            "note": "Player listed OUT — no projection (the prop would have no action).",
+        }
+
     weights = recency_weights(len(values), half_life)
-    dist, model = fit_count_model(values, weights)
+    dist, model = fit_count_model(values, weights, factor)
 
     result = {
         "mean": float(dist.mean()),
         "median": float(dist.median()),
         "model": model,
     }
+
+    # Only surface injury fields when an adjustment was actually requested, so the
+    # no-status call returns exactly the same shape as before this feature.
+    if injury_status is not None and injury_status.strip() != "":
+        result["available"] = True
+        result["injury_status"] = injury_status.strip().lower()
+        result["injury_factor"] = factor
 
     if line is not None:
         # Over the line means strictly greater: X >= floor(line) + 1 == sf(floor(line)).
@@ -139,6 +205,7 @@ def project_combo_stat(
     stat_values: dict[str, list[int]],
     line: float | None = None,
     half_life: float | None = None,
+    injury_status: str | None = None,
 ) -> dict:
     """
     Project a COMBINED prop — the per-game sum of several stats, e.g. PRA
@@ -179,7 +246,9 @@ def project_combo_stat(
         raise ValueError("Cannot project from empty stat histories.")
 
     combined = [int(sum(game)) for game in zip(*stat_values.values())]
-    result = project_stat(combined, line, half_life)
+    result = project_stat(combined, line, half_life, injury_status)
+    if not result.get("available", True):  # "out" — void, return as-is
+        return result
     result["stats"] = list(stat_values)
     result["components"] = {
         stat: float(np.mean(values)) for stat, values in stat_values.items()

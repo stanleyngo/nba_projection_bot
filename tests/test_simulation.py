@@ -80,6 +80,70 @@ def test_recency_weighting_shifts_mean_toward_recent_games():
 
 
 # ---------------------------------------------------------------------------
+# injury-status adjustment
+# ---------------------------------------------------------------------------
+
+_INJ_VALUES = [25, 30, 20, 28, 22, 26, 24, 29, 21, 27]
+
+
+def test_injury_status_none_matches_unadjusted():
+    # Passing no status (or None) must be byte-identical to the old signature.
+    a = simulation.project_stat(_INJ_VALUES, line=24.5)
+    b = simulation.project_stat(_INJ_VALUES, line=24.5, injury_status=None)
+    assert a == b
+    # And no injury bookkeeping keys leak into the unadjusted result.
+    assert "injury_status" not in a and "available" not in a
+
+
+def test_injury_status_scales_mean_down_monotonically():
+    healthy = simulation.project_stat(_INJ_VALUES, injury_status="healthy")["mean"]
+    quest = simulation.project_stat(_INJ_VALUES, injury_status="questionable")["mean"]
+    doubt = simulation.project_stat(_INJ_VALUES, injury_status="doubtful")["mean"]
+    assert healthy > quest > doubt
+    # The scale factor is applied exactly to the mean.
+    assert quest == pytest.approx(healthy * 0.90, rel=1e-6)
+
+
+def test_injury_status_lowers_prob_over_for_fixed_line():
+    line = 24.5
+    healthy = simulation.project_stat(_INJ_VALUES, line=line, injury_status="healthy")["prob_over"]
+    quest = simulation.project_stat(_INJ_VALUES, line=line, injury_status="questionable")["prob_over"]
+    doubt = simulation.project_stat(_INJ_VALUES, line=line, injury_status="doubtful")["prob_over"]
+    assert healthy >= quest >= doubt
+
+
+def test_injury_factor_preserves_dispersion_and_model():
+    # Clearly overdispersed data -> NB; the injury scale must keep it NB and
+    # keep the variance-to-mean ratio (only the location shifts).
+    overdispersed = [5, 40, 10, 35, 8, 30, 12, 45, 6, 38]
+    dist_h, model_h = simulation.fit_count_model(overdispersed, factor=1.0)
+    dist_d, model_d = simulation.fit_count_model(overdispersed, factor=0.55)
+    assert model_h == model_d == "negative_binomial"
+    ratio_h = dist_h.var() / dist_h.mean()
+    ratio_d = dist_d.var() / dist_d.mean()
+    assert ratio_d == pytest.approx(ratio_h, rel=1e-6)
+
+
+def test_injury_status_out_is_void():
+    out = simulation.project_stat(_INJ_VALUES, line=24.5, injury_status="out")
+    assert out["available"] is False
+    assert out["injury_status"] == "out"
+    assert "prob_over" not in out and "mean" not in out
+
+
+def test_injury_status_unknown_raises():
+    with pytest.raises(ValueError):
+        simulation.project_stat(_INJ_VALUES, injury_status="banged-up")
+
+
+def test_injury_factor_helper():
+    assert simulation.injury_factor(None) == 1.0
+    assert simulation.injury_factor("") == 1.0
+    assert simulation.injury_factor("QUESTIONABLE") == 0.90
+    assert simulation.injury_factor("out") is None
+
+
+# ---------------------------------------------------------------------------
 # project_combo_stat
 # ---------------------------------------------------------------------------
 
@@ -136,6 +200,20 @@ def test_combo_captures_correlation_via_actual_sums():
     # A constant series collapses to Poisson at the mean, with almost all mass on 30.
     assert out["model"] == "poisson"
     assert out["mean"] == pytest.approx(30.0, rel=1e-6)
+
+
+def test_combo_injury_status_lowers_mean_and_voids_on_out():
+    stat_values = {
+        "points": [25, 30, 20, 28, 22],
+        "rebounds": [10, 12, 8, 11, 9],
+        "assists": [6, 8, 5, 7, 6],
+    }
+    healthy = simulation.project_combo_stat(stat_values, injury_status="healthy")["mean"]
+    doubt = simulation.project_combo_stat(stat_values, injury_status="doubtful")["mean"]
+    assert doubt < healthy
+    out = simulation.project_combo_stat(stat_values, line=45.5, injury_status="out")
+    assert out["available"] is False
+    assert "stats" not in out  # void short-circuits before combo bookkeeping
 
 
 def test_simulate_combo_stat_is_reproducible_and_correlation_preserving():
