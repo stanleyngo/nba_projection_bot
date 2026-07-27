@@ -1,0 +1,18 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+}
+
+.scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+.col {
+  width: 100%;
+  max-width: 740px;
+  margin: 0 auto;
+  padding: 26px clamp(16px, 4vw, 24px) 8px;
+}

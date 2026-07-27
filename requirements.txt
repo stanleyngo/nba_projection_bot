@@ -10,11 +10,13 @@ pytest==7.4.2
 # LLM agent
 anthropic==0.116.0
 
-# API + UI
+# RAG (recent-news retrieval in rag.py)
+tavily-python==0.7.26
+voyageai==0.5.0
+
+# API + UI (UI is a static page served by FastAPI at GET /)
 fastapi==0.139.0
 uvicorn==0.51.0
-streamlit==1.59.2
-requests==2.34.2
 slowapi==0.1.10
 
 # database

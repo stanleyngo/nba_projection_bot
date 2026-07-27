@@ -28,6 +28,84 @@ MODEL = "claude-sonnet-4-5"
 MAX_TOKENS = 1024
 MAX_TOOL_ITERATIONS = 5
 
+# The projection-family tools whose results the UI renders as visual cards.
+# web_search and recent_stats produce prose/raw context, not a card, so they're
+# excluded here; the news tool gets its own card (see NEWS_TOOL below).
+PROJECTION_TOOLS = frozenset({"project_stat_over_line", "project_combo_over_line"})
+
+# The RAG tool whose news/analysis result the UI renders as a News & Analysis card.
+NEWS_TOOL = "get_player_news_context"
+
+
+def is_projection_tool(name: str) -> bool:
+    """True if `name` is a projection tool whose result the UI cards render."""
+    return name in PROJECTION_TOOLS
+
+
+def is_news_tool(name: str) -> bool:
+    """True if `name` is the news tool whose result the UI news card renders."""
+    return name == NEWS_TOOL
+
+
+def news_record(tool_input: dict, result: dict) -> dict:
+    """
+    Build the news-card record the API hands to the frontend for one
+    get_player_news_context call: the player asked about, paired with the two
+    retrieved lists. `news` items are reported facts and `analysis` items are
+    opinion — the UI must keep them visually separate and label analysis as
+    opinion (mirroring the framing rules in SYSTEM_PROMPT). Either list may be
+    empty, which is expected (nothing relevant found), not an error.
+    """
+    return {
+        "player_name": tool_input.get("player_name"),
+        "news": result.get("news", []),
+        "analysis": result.get("analysis", []),
+    }
+
+
+async def ensure_player_news(projections: list[dict], news: list[dict]) -> None:
+    """
+    Guarantee a news card for every projected player, in place.
+
+    News (and any injury info it carries) must show up regardless of whether the
+    model chose to fetch it — so for each unique player that has a projection but
+    no news record yet, fetch it here and append. A fetch failure is swallowed:
+    news is supplementary context and must never break the projection answer.
+    """
+    covered = {record.get("player_name") for record in news}
+    for projection in projections:
+        name = projection.get("player_name")
+        if not name or name in covered:
+            continue
+        covered.add(name)
+        try:
+            context = await tools.get_player_news_context(name)
+        except Exception as exc:  # network/keys/etc. — supplementary, don't fail the turn
+            print(f"[news backfill] fetch failed for {name!r}: {exc}")
+            continue
+        news.append(news_record({"player_name": name}, context))
+
+
+def projection_record(name: str, tool_input: dict, result: dict) -> dict:
+    """
+    Build the card record the API hands to the frontend for one projection
+    tool call: the player/stat/line the model asked about, paired with the
+    engine's result dict (mean, median, model, prob_over/under/push, injury
+    fields). For combo props the component stats are joined (e.g.
+    "points+rebounds+assists") into a single `stat` label; `line` is None when
+    the model asked for a general projection with no over/under line.
+    """
+    if name == "project_combo_over_line":
+        stat = "+".join(tool_input.get("stats", []))
+    else:
+        stat = tool_input.get("stat")
+    return {
+        "player_name": tool_input.get("player_name"),
+        "stat": stat,
+        "line": tool_input.get("line"),
+        "result": result,
+    }
+
 SYSTEM_PROMPT = """You are an NBA player stat projection assistant. You help \
 users understand the likelihood of a player exceeding a given stat line \
 (points, rebounds, assists, steals, blocks, or threes) based on their \
@@ -74,16 +152,23 @@ the same way you note the model's overall simplicity.
 (without a specific stat line) are also in scope — answer these using \
 web_search alone, without necessarily calling the projection tool.
 - Before giving any projection, always use web_search once to confirm the \
-season is currently active and a game is actually imminent — don't rely \
-on assumption, even if it seems obvious. The available data may be from \
+season is currently active and a game is actually imminent, AND to check \
+the player's current injury designation. Always pass that designation to \
+the projection tool's injury_status whenever there is one, so injury \
+status is reflected every time — don't rely on assumption, even if it \
+seems obvious. The available data may be from \
 a prior season if it's currently the offseason or a long playoff gap. \
 Clearly state in your answer if the projection is based on a prior \
 season's data rather than an active, upcoming game.
 - You also have a get_player_news_context tool, which returns two \
 separate lists: "news" (reported facts, e.g. injury status) and \
-"analysis" (analyst/sportswriter opinion and commentary). Use it when \
-recent-news or outside-analysis color would genuinely add something — \
-not on every question.
+"analysis" (analyst/sportswriter opinion and commentary). News is ALWAYS \
+shown to the user for any player they ask about. When you give a \
+projection, that player's news is attached automatically, so you do NOT \
+need to call get_player_news_context yourself on a projection question. \
+But when the question is about a specific player and you are NOT giving a \
+projection (a pure availability, injury, or news question), you MUST call \
+get_player_news_context for that player so their news still appears.
 - "news" items are reported facts — present them plainly, e.g. "Recent \
 news: ...".
 - "analysis" items are opinions, not facts, and this is a strict rule, \
@@ -118,18 +203,25 @@ the question — the statistical projection should still be given \
 normally regardless.
 """
 
-async def run_agent(user_message: str, conversation_id: int | None = None) -> tuple[str, int]:
+async def run_agent(user_message: str, conversation_id: int | None = None) -> tuple[str, int, list[dict], list[dict]]:
     """
     Run one user turn through the agent loop: send `user_message` to the
     model (with prior turns from `conversation_id` loaded as context, if
     given), resolve any tool calls it makes, and return its final text
     response once it's done calling tools.
 
-    Returns (answer, conversation_id) — conversation_id is echoed back
-    (or newly created, if it was None) so the caller can pass it on the
-    NEXT call to keep the same conversation going. An HTTP request has no
-    memory of its own; this id is the only thing that ties separate
-    requests back into one conversation.
+    Returns (answer, conversation_id, projections, news):
+    - conversation_id is echoed back (or newly created, if it was None) so
+      the caller can pass it on the NEXT call to keep the same conversation
+      going. An HTTP request has no memory of its own; this id is the only
+      thing that ties separate requests back into one conversation.
+    - projections is a list of card records (see projection_record) — one per
+      projection tool call the model made this turn, in call order. It is
+      empty when the turn made no projection (e.g. an injury-only question),
+      which the UI treats as "render the text answer, no card".
+    - news is a list of news-card records (see news_record) — one per
+      get_player_news_context call this turn. Empty when the model pulled no
+      news, which the UI treats the same way.
     """
 
     load_dotenv()
@@ -139,6 +231,8 @@ async def run_agent(user_message: str, conversation_id: int | None = None) -> tu
         conversation_id = await db.create_conversation()
     history = await db.load_history(conversation_id)
     messages = history + [{"role": "user", "content": user_message}]
+    projections: list[dict] = []
+    news: list[dict] = []
     for iteration in range(MAX_TOOL_ITERATIONS):
         # TEMPORARY DIAGNOSTIC — remove once the timeout question is
         # resolved. Times just the API call itself, so you can see whether
@@ -170,14 +264,23 @@ async def run_agent(user_message: str, conversation_id: int | None = None) -> tu
             if not text_blocks:
                 raise ValueError("Expected at least one text block in the final response.")
             answer = "\n\n".join(block.text for block in text_blocks)
+            # Always surface news for any projected player, even if the model
+            # didn't pull it during the loop.
+            await ensure_player_news(projections, news)
             await db.append_message(conversation_id, "user", user_message)
             await db.append_message(conversation_id, "assistant", answer)
-            return answer, conversation_id
+            return answer, conversation_id, projections, news
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
                 try:
                     result = await tools.call_tool(block.name, block.input)
+                    if is_projection_tool(block.name):
+                        projections.append(
+                            projection_record(block.name, block.input, result)
+                        )
+                    elif is_news_tool(block.name):
+                        news.append(news_record(block.input, result))
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
