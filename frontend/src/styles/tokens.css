@@ -1,0 +1,38 @@
+:root {
+  --bg:        #0E1116;
+  --bg-elev:   #161B22;
+  --bg-user:   #1E2530;
+  --surface:   #12171E;
+  --line:      #232B36;
+  --line-soft: #1B222B;
+  --text:      #E9ECF1;
+  --muted:     #98A2B0;
+  --faint:     #626C7A;
+  --accent:    #E8622C;
+  --accent-dim:#7a3a1e;
+  --over:      #2DBE6C;
+  --over-dim:  #123a26;
+  --under:     #586274;
+  --amber:     #E8A93C;
+  --red:       #E5544B;
+  --radius:    14px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background:
+    radial-gradient(1100px 520px at 50% -10%, #171d26 0%, rgba(23, 29, 38, 0) 60%),
+    var(--bg);
+  color: var(--text);
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+#root { height: 100dvh; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

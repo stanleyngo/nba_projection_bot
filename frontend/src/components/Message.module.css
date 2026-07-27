@@ -1,0 +1,87 @@
+.msgUser,
+.msgAssistant {
+  margin: 18px 0;
+  display: flex;
+  flex-direction: column;
+  animation: rise 0.28s ease both;
+}
+.msgUser {
+  align-items: flex-end;
+}
+.msgAssistant {
+  align-items: stretch;
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.bubbleUser {
+  background: var(--bg-user);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 10px 15px;
+  border-radius: 15px 15px 5px 15px;
+  max-width: 82%;
+  font-size: 14.5px;
+}
+
+.answer {
+  color: var(--text);
+  font-size: 15px;
+  max-width: 92%;
+}
+.answer p {
+  margin: 0 0 11px;
+}
+.answer p:last-child {
+  margin-bottom: 0;
+}
+.answer a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-dim);
+}
+.answer a:hover {
+  border-bottom-color: var(--accent);
+}
+.answer code {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.88em;
+  background: var(--bg-elev);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12.5px;
+  letter-spacing: 0.03em;
+  padding: 4px 0;
+  margin: 18px 0;
+}
+.ball {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: bounce 0.7s infinite ease-in-out;
+}
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); opacity: 0.5; }
+  50% { transform: translateY(-6px); opacity: 1; }
+}
+
+.errbubble {
+  background: #1e1315;
+  border: 1px solid #47262a;
+  color: #f0b9b4;
+  padding: 11px 14px;
+  border-radius: 13px;
+  font-size: 14px;
+  max-width: 82%;
+}
