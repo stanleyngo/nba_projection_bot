@@ -195,6 +195,7 @@ async def ask(
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except anthropic.APIError as e:
+        logging.exception("Anthropic API error in /ask")
         raise HTTPException(
             status_code=502,
             detail="The AI service is temporarily unavailable. Please try again later.",
