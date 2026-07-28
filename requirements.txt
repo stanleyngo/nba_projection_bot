@@ -19,7 +19,7 @@ voyageai==0.5.0
 fastapi==0.139.0
 uvicorn==0.51.0
 slowapi==0.1.10
-asyncpg==1.0.0
+asyncpg==0.31.0
 
 # database
 sqlalchemy==2.0.22
