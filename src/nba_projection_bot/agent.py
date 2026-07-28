@@ -240,6 +240,7 @@ async def run_agent(
                         }
                     )
                 except (ValueError, TypeError) as e:
+                    logging.exception(f"Tool call failed: {block.name}({block.input!r})")
                     tool_results.append(
                         {
                             "type": "tool_result",
