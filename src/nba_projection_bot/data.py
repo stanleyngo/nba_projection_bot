@@ -11,6 +11,7 @@ current nba_api docs.
 
 import time
 from datetime import date
+from os import getenv
 
 import pandas as pd
 import requests
@@ -36,6 +37,14 @@ MAX_N_GAMES = 200
 MAX_RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 1.0
 
+# stats.nba.com silently blocks/times out requests from most cloud provider
+# IP ranges (Render included) while working fine from a residential IP —
+# routing through a residential/rotating proxy works around this. Optional:
+# None (the default, if unset) means "call stats.nba.com directly", which is
+# what local dev wants since a home IP isn't blocked. Format is a standard
+# proxy URL, e.g. "http://user:pass@host:port".
+NBA_API_PROXY = getenv("NBA_API_PROXY")
+
 _today = date.today()
 _season_start_year = _today.year if _today.month >= 11 else _today.year - 1
 CURRENT_SEASON = f"{_season_start_year}-{str(_season_start_year + 1)[-2:]}"
@@ -45,7 +54,10 @@ def _fetch_game_log(player_id: int, season: str, season_type) -> pd.DataFrame:
     for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
         try:
             log = playergamelog.PlayerGameLog(
-                player_id=player_id, season=season, season_type_all_star=season_type
+                player_id=player_id,
+                season=season,
+                season_type_all_star=season_type,
+                proxy=NBA_API_PROXY,
             )
             return log.get_data_frames()[0]
         except requests.exceptions.RequestException:
