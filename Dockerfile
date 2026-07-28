@@ -20,7 +20,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 
-COPY --from=frontend-build /frontend/dist ./src/nba_projection_bot/static
+COPY --from=frontend-build /src/nba_projection_bot/static ./src/nba_projection_bot/static
 
 ENV PYTHONPATH=/app/src
 
