@@ -1,5 +1,5 @@
 """
-agent.py — Stage 4: the conversation loop that ties the LLM to the tools.
+agent.py
 
 This module's job: own the back-and-forth with the Anthropic API — send the
 conversation history plus tools.get_tool_schemas() to the model, and when
@@ -7,26 +7,22 @@ the model responds with a tool_use block, call tools.call_tool(...) and
 feed the result back, repeating until the model returns a final text answer
 instead of another tool call.
 
-NOTE: this uses the raw anthropic SDK (client.messages.create()), not a
-framework — every step of the loop is explicit here rather than hidden
-behind an abstraction. That's the point for a first LLM project: you should
-be able to see exactly what gets sent and received at each turn, rather
-than trusting a framework to do it for you.
 """
 
 import asyncio
 import json
-import time
+import logging
 
 import anthropic
 from dotenv import load_dotenv
 
 import nba_projection_bot.db as db
 import nba_projection_bot.tools as tools
+from nba_projection_bot.prompts import SYSTEM_PROMPT
 
 MODEL = "claude-sonnet-4-5"
-MAX_TOKENS = 1024
-MAX_TOOL_ITERATIONS = 5
+MAX_TOKENS = 2048
+MAX_TOOL_ITERATIONS = 7
 
 # The projection-family tools whose results the UI renders as visual cards.
 # web_search and recent_stats produce prose/raw context, not a card, so they're
@@ -63,6 +59,37 @@ def news_record(tool_input: dict, result: dict) -> dict:
     }
 
 
+TITLE_MODEL = "claude-haiku-4-5"
+
+
+async def generate_title(client: anthropic.AsyncAnthropic, user_message: str, answer: str) -> str:
+    """
+    Generate a short (3-6 word) title for a new conversation, for the
+    sidebar. Uses a cheap/fast model — this is a small auxiliary task, not
+    something that needs the main model's full capability.
+    """
+    response = await client.messages.create(
+        model=TITLE_MODEL,
+        max_tokens=20,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Summarize this exchange as a short 3-6 word title for a "
+                    "conversation list, like a chat app would show. Respond with "
+                    "ONLY the title itself — no quotes, no trailing punctuation, "
+                    "nothing else.\n\n"
+                    f"Question: {user_message}\n\nAnswer: {answer}"
+                ),
+            }
+        ],
+    )
+    text_blocks = [block for block in response.content if block.type == "text"]
+    if not text_blocks:
+        return user_message[:50]  # fallback: just truncate the question itself
+    return text_blocks[0].text.strip()
+
+
 async def ensure_player_news(projections: list[dict], news: list[dict]) -> None:
     """
     Guarantee a news card for every projected player, in place.
@@ -80,8 +107,8 @@ async def ensure_player_news(projections: list[dict], news: list[dict]) -> None:
         covered.add(name)
         try:
             context = await tools.get_player_news_context(name)
-        except Exception as exc:  # network/keys/etc. — supplementary, don't fail the turn
-            print(f"[news backfill] fetch failed for {name!r}: {exc}")
+        except Exception:  # network/keys/etc. — supplementary, don't fail the turn
+            logging.exception(f"News backfill fetch failed for {name!r}")
             continue
         news.append(news_record({"player_name": name}, context))
 
@@ -98,7 +125,7 @@ def projection_record(name: str, tool_input: dict, result: dict) -> dict:
     if name == "project_combo_over_line":
         stat = "+".join(tool_input.get("stats", []))
     else:
-        stat = tool_input.get("stat")
+        stat = tool_input["stat"]
     return {
         "player_name": tool_input.get("player_name"),
         "stat": stat,
@@ -106,155 +133,61 @@ def projection_record(name: str, tool_input: dict, result: dict) -> dict:
         "result": result,
     }
 
-SYSTEM_PROMPT = """You are an NBA player stat projection assistant. You help \
-users understand the likelihood of a player exceeding a given stat line \
-(points, rebounds, assists, steals, blocks, or threes) based on their \
-recent game performance.
 
-Rules:
-- Only answer questions about NBA player stat projections. If asked \
-anything unrelated (general chat, other sports, coding help, etc.), \
-politely decline and explain what you can help with instead.
-- Never estimate, guess, or calculate a projection or probability \
-yourself. Always use the provided tools to get real data and run the \
-simulation — you are a router and explainer, not a calculator.
-- When you give a projection, mention that it's based on a simple \
-statistical model (resampling from recent games), not a sophisticated \
-predictive model — be upfront about that limitation.
-- Present projections as statistical information, not betting advice. \
-Never tell the user whether they should bet on something.
-- For combined props — a line on the SUM of several stats, e.g. \
-points+rebounds+assists ("PRA") — use the project_combo_over_line tool rather \
-than adding up separate single-stat projections; it accounts for the \
-correlation between the stats within a game. The same "use the tool, never \
-calculate it yourself" rule applies.
-- The projection tool returns results from multiple simulation methods. \
-Summarize the consensus across methods in plain language, and call out \
-any meaningful disagreement between them — don't just report one method's \
-numbers and ignore the rest.
-- You have a web_search tool. Use it sparingly, only when it would \
-materially affect the answer — e.g. checking whether a player is \
-questionable/out with an injury, or on a back-to-back — not for general \
-background. When you do use it, weave what you find into your \
-explanation alongside the statistical projection (e.g. "he's projected \
-at 25.7 points, though he's currently listed questionable with an ankle \
-issue"). The statistical projection itself must still come only from the \
-projection tool, never from search results or your own estimate.
-- When web_search turns up an injury designation for the player you're \
-projecting (probable, questionable, doubtful, or out), pass it into the \
-projection tool's injury_status parameter so the numbers actually reflect \
-it — don't just mention the injury in prose while reporting a healthy \
-projection. If the player is out, the tool returns no projection (the prop \
-has no action); report that plainly rather than inventing a number. The \
-injury adjustment is a simple heuristic multiplier, so note that limitation \
-the same way you note the model's overall simplicity.
-- Standalone questions about a player's availability or injury status \
-(without a specific stat line) are also in scope — answer these using \
-web_search alone, without necessarily calling the projection tool.
-- Before giving any projection, always use web_search once to confirm the \
-season is currently active and a game is actually imminent, AND to check \
-the player's current injury designation. Always pass that designation to \
-the projection tool's injury_status whenever there is one, so injury \
-status is reflected every time — don't rely on assumption, even if it \
-seems obvious. The available data may be from \
-a prior season if it's currently the offseason or a long playoff gap. \
-Clearly state in your answer if the projection is based on a prior \
-season's data rather than an active, upcoming game.
-- You also have a get_player_news_context tool, which returns two \
-separate lists: "news" (reported facts, e.g. injury status) and \
-"analysis" (analyst/sportswriter opinion and commentary). News is ALWAYS \
-shown to the user for any player they ask about. When you give a \
-projection, that player's news is attached automatically, so you do NOT \
-need to call get_player_news_context yourself on a projection question. \
-But when the question is about a specific player and you are NOT giving a \
-projection (a pure availability, injury, or news question), you MUST call \
-get_player_news_context for that player so their news still appears.
-- "news" items are reported facts — present them plainly, e.g. "Recent \
-news: ...".
-- "analysis" items are opinions, not facts, and this is a strict rule, \
-not a stylistic preference: every single time you include anything from \
-the "analysis" list, you must explicitly attribute it as someone's \
-opinion — e.g. "One analyst believes ...", "According to [sportswriter/ \
-outlet], ...", "Some commentators think ...". Never state an analysis \
-item as settled fact, never drop the attribution, and never phrase it in \
-a way a reader could mistake for something you or the data verified. If \
-the snippet doesn't include a specific source name, still qualify it \
-generically (e.g. "one analyst suggested...") rather than dropping the \
-qualifier just because a name isn't available.
-- Opinion/analysis content — because it is speculation about future \
-performance — must NEVER influence, adjust, hedge, or blend into the \
-statistical projection. The projection numbers come only from \
-project_stat_over_line, always, regardless of what any analyst says. If \
-an analyst's opinion contradicts the statistical projection, present \
-both plainly and let the user weigh them — do not resolve the conflict \
-or lean the numbers toward the opinion.
-- Each item from get_player_news_context includes a "url" alongside its \
-text — always cite it as a clickable markdown link when you present that \
-item, so the user can read the original source, e.g. "According to \
-[The Athletic](https://...), ..." or "[Recent news](https://...): ...". \
-Never present a news or analysis item without its link.
-- get_player_news_context may return an empty "news" and/or "analysis" \
-list — this is expected and correct, not an error. It means nothing was \
-found that was actually relevant, not that something went wrong. If a \
-list comes back empty, just say so plainly (e.g. "No notable recent news \
-found for [player]."). Never invent a headline or opinion to fill the \
-gap, and never let an empty result stop you from answering the rest of \
-the question — the statistical projection should still be given \
-normally regardless.
-"""
-
-async def run_agent(user_message: str, conversation_id: int | None = None) -> tuple[str, int, list[dict], list[dict]]:
+async def run_agent(
+    user_message: str,
+    user_id: int,
+    conversation_id: int | None = None,
+    trace: list[dict] | None = None,
+) -> tuple[str, int, list[dict], list[dict]]:
     """
     Run one user turn through the agent loop: send `user_message` to the
     model (with prior turns from `conversation_id` loaded as context, if
     given), resolve any tool calls it makes, and return its final text
     response once it's done calling tools.
 
+    `user_id` must be the CALLER-VERIFIED internal user id (from
+    db.get_or_create_user, after verifying a Google ID token — see
+    api.py) — never a raw, client-supplied value. Used both to record
+    ownership when starting a brand-new conversation, and to verify
+    ownership of an EXISTING conversation_id on every load/append —
+    db.load_history and db.append_message both raise PermissionError if
+    conversation_id doesn't actually belong to user_id, so a caller can't
+    read or write into someone else's conversation just by knowing or
+    guessing its id.
+
     Returns (answer, conversation_id, projections, news):
     - conversation_id is echoed back (or newly created, if it was None) so
       the caller can pass it on the NEXT call to keep the same conversation
       going. An HTTP request has no memory of its own; this id is the only
       thing that ties separate requests back into one conversation.
-    - projections is a list of card records (see projection_record) — one per
-      projection tool call the model made this turn, in call order. It is
-      empty when the turn made no projection (e.g. an injury-only question),
-      which the UI treats as "render the text answer, no card".
-    - news is a list of news-card records (see news_record) — one per
-      get_player_news_context call this turn. Empty when the model pulled no
-      news, which the UI treats the same way.
     """
 
     load_dotenv()
     anthropic_client = anthropic.AsyncAnthropic()
 
+    is_new_conversation = conversation_id is None
     if conversation_id is None:
-        conversation_id = await db.create_conversation()
-    history = await db.load_history(conversation_id)
+        conversation_id = await db.create_conversation(user_id)
+    history = await db.load_history(conversation_id, user_id)
     messages = history + [{"role": "user", "content": user_message}]
     projections: list[dict] = []
     news: list[dict] = []
-    for iteration in range(MAX_TOOL_ITERATIONS):
-        # TEMPORARY DIAGNOSTIC — remove once the timeout question is
-        # resolved. Times just the API call itself, so you can see whether
-        # slowness is one expensive call (e.g. a real web search) or many
-        # cheaper calls adding up (e.g. several pause_turn round-trips).
-        start = time.perf_counter()
+    for _ in range(MAX_TOOL_ITERATIONS):
         response = await anthropic_client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=[{
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            tools=tools.get_tool_schemas(),
-            messages=messages,
-        )
-        elapsed = time.perf_counter() - start
-        print(
-            f"[iteration {iteration}] {elapsed:.2f}s, stop_reason={response.stop_reason}, "
-            f"cache_creation_input_tokens={response.usage.cache_creation_input_tokens}, "
-            f"cache_read_input_tokens={response.usage.cache_read_input_tokens}"
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            # Plain dicts are correct here at runtime — the SDK validates/
+            # converts them internally
+            tools=tools.get_tool_schemas(),  # type: ignore[arg-type]
+            messages=messages,  # type: ignore[arg-type]
         )
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason == "pause_turn":
@@ -263,36 +196,58 @@ async def run_agent(user_message: str, conversation_id: int | None = None) -> tu
             text_blocks = [block for block in response.content if block.type == "text"]
             if not text_blocks:
                 raise ValueError("Expected at least one text block in the final response.")
-            answer = "\n\n".join(block.text for block in text_blocks)
+            # web_search citations split the answer into multiple text blocks,
+            # one per cited segment — a block boundary marks a citation
+            # attachment point, not an intentional paragraph break. The model
+            # puts any real paragraph break inside a block's own text, so
+            # blocks must be concatenated directly, not joined with "\n\n".
+            answer = "".join(block.text for block in text_blocks)
             # Always surface news for any projected player, even if the model
             # didn't pull it during the loop.
             await ensure_player_news(projections, news)
-            await db.append_message(conversation_id, "user", user_message)
-            await db.append_message(conversation_id, "assistant", answer)
+            await db.append_message(conversation_id, user_id, "user", user_message)
+            await db.append_message(
+                conversation_id,
+                user_id,
+                "assistant",
+                answer,
+                projections=projections,
+                news=news,
+            )
+            if is_new_conversation:
+                try:
+                    title = await generate_title(anthropic_client, user_message, answer)
+                    await db.set_conversation_title(conversation_id, title)
+                except Exception:
+                    logging.exception(f"Title generation failed for conversation {conversation_id}")
             return answer, conversation_id, projections, news
-        tool_results = []
+        tool_results: list[dict[str, str | bool]] = []
         for block in response.content:
             if block.type == "tool_use":
+                if trace is not None:
+                    trace.append({"tool": block.name, "input": block.input})
                 try:
                     result = await tools.call_tool(block.name, block.input)
                     if is_projection_tool(block.name):
-                        projections.append(
-                            projection_record(block.name, block.input, result)
-                        )
+                        projections.append(projection_record(block.name, block.input, result))
                     elif is_news_tool(block.name):
                         news.append(news_record(block.input, result))
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result),
-                    })
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result),
+                        }
+                    )
                 except (ValueError, TypeError) as e:
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "is_error": True,
-                        "content": str(e),
-                    })
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "is_error": True,
+                            "content": str(e),
+                        }
+                    )
         messages.append({"role": "user", "content": tool_results})
     raise RuntimeError(
         f"Unable to generate a response after {MAX_TOOL_ITERATIONS} tool-use "
@@ -301,8 +256,9 @@ async def run_agent(user_message: str, conversation_id: int | None = None) -> tu
 
 
 if __name__ == "__main__":
-    # Once run_agent returns (answer, conversation_id), unpack both here —
-    # e.g. call it twice with the same conversation_id to sanity-check that
-    # the second call actually has memory of the first.
-    reply = asyncio.run(run_agent("What's Nikola Jokic projected for against a 25.5 point line?"))
-    print(reply)
+    answer, conversation_id, projections, news = asyncio.run(
+        run_agent("What's Nikola Jokic projected for against a 25.5 point line?", user_id=1)
+    )
+    print(answer, conversation_id)
+    print("projections:", projections)
+    print("news:", news)

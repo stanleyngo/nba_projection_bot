@@ -1,24 +1,9 @@
 """
-simulation.py — Stage 2: parametric projection engine.
+simulation.py
 
 Given a player's recent per-game values for a counting stat (points, rebounds,
 ...), fit a discrete count distribution and read the over/under/push
 probabilities against a betting line straight off that distribution.
-
-Why parametric instead of the old bootstrap resample:
-  * Resampling with replacement can only ever return values already observed, so
-    the probability of anything beyond the observed range is a hard 0 (or 1) —
-    no tails. A player who scored <= 35 in his last 15 games would get
-    P(> 40) == 0, which is obviously wrong.
-  * 10,000 resampled draws add no information over the ~15 underlying data
-    points; prob_over just re-expresses np.mean(values > line) with false
-    precision.
-
-Counting stats are non-negative integers and usually OVERDISPERSED (variance >
-mean), so the natural model is the Negative Binomial, with the Poisson as the
-fallback when the data is equi-/under-dispersed. We fit by method of moments —
-no optimizer — so every step is inspectable, and probabilities come from the
-fitted distribution's CDF/SF exactly.
 
 The resampling helpers (`simulate_stat`, `simulate_multiple_stats`) are kept
 because `simulate_multiple_stats` preserves the empirical cross-stat correlation
@@ -80,9 +65,7 @@ def injury_factor(status: str | None) -> float | None:
         return 1.0
     key = status.strip().lower()
     if key not in INJURY_FACTORS:
-        raise ValueError(
-            f"Unknown injury status {status!r}. Valid: {list(INJURY_FACTORS)}"
-        )
+        raise ValueError(f"Unknown injury status {status!r}. Valid: {list(INJURY_FACTORS)}")
     return INJURY_FACTORS[key]
 
 
@@ -239,20 +222,16 @@ def project_combo_stat(
     lengths = {stat: len(values) for stat, values in stat_values.items()}
     n_games = next(iter(lengths.values()))
     if any(length != n_games for length in lengths.values()):
-        raise ValueError(
-            f"All stat lists must have the same length; got {lengths}."
-        )
+        raise ValueError(f"All stat lists must have the same length; got {lengths}.")
     if n_games == 0:
         raise ValueError("Cannot project from empty stat histories.")
 
-    combined = [int(sum(game)) for game in zip(*stat_values.values())]
+    combined = [int(sum(game)) for game in zip(*stat_values.values(), strict=True)]
     result = project_stat(combined, line, half_life, injury_status)
     if not result.get("available", True):  # "out" — void, return as-is
         return result
     result["stats"] = list(stat_values)
-    result["components"] = {
-        stat: float(np.mean(values)) for stat, values in stat_values.items()
-    }
+    result["components"] = {stat: float(np.mean(values)) for stat, values in stat_values.items()}
     return result
 
 

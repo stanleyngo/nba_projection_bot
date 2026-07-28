@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+# E/F = pycodestyle+pyflakes (the "does this even run cleanly" basics),
+# I = import sorting, UP = modernize syntax for the installed Python version,
+# B = bugbear (common real-bug patterns, e.g. mutable default args).
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+mypy_path = "src"
+explicit_package_bases = true
+ignore_missing_imports = true

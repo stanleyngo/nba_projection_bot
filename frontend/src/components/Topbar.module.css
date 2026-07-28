@@ -46,6 +46,12 @@
   .tag { display: none; }
 }
 
+.authArea {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .newchat {
   font-family: "IBM Plex Sans", sans-serif;
   font-size: 13px;

@@ -17,10 +17,10 @@ import numpy as np
 
 import nba_projection_bot.simulation as simulation
 
-
 # ---------------------------------------------------------------------------
 # Scoring metrics (pure)
 # ---------------------------------------------------------------------------
+
 
 def brier_score(preds: list[float], outcomes: list[int]) -> float:
     """Mean squared error between predicted probabilities and binary outcomes."""
@@ -69,6 +69,7 @@ def calibration_curve(
 # ---------------------------------------------------------------------------
 # Walk-forward evaluation
 # ---------------------------------------------------------------------------
+
 
 def trailing_median_line(history: list[int]) -> float:
     """A synthetic line: the trailing median (a book's line sits near the median)."""
@@ -208,7 +209,7 @@ def walk_forward_combo(
     n_games = len(stat_values[stats[0]])
     if any(len(stat_values[s]) != n_games for s in stats):
         raise ValueError("All stat lists must have the same length.")
-    combined = [int(sum(game)) for game in zip(*(stat_values[s] for s in stats))]
+    combined = [int(sum(game)) for game in zip(*(stat_values[s] for s in stats), strict=True)]
 
     grid = offsets if offsets else (0.0,)
     preds: list[float] = []
@@ -256,7 +257,7 @@ def _print_report(results: dict) -> None:
         print(f"{name:<12}{r['n']:>6}{r['brier']:>10.4f}{r['log_loss']:>12.4f}")
     print("\ncalibration (parametric) - bin_pred vs bin_obs (count):")
     mean_pred, mean_obs, counts = results["parametric"]["calibration"]
-    for mp, mo, c in zip(mean_pred, mean_obs, counts):
+    for mp, mo, c in zip(mean_pred, mean_obs, counts, strict=True):
         if c:
             print(f"  pred={mp:.2f}  obs={mo:.2f}  n={c}")
 
@@ -276,26 +277,42 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Backtest the projection engine against a real player's game log."
     )
-    parser.add_argument("player", nargs="?", default="Nikola Jokic",
-                        help="Player name (default: Nikola Jokic).")
-    parser.add_argument("--stat", default="points",
-                        help="Stat to backtest (default: points).")
-    parser.add_argument("--combo", type=lambda s: [x.strip() for x in s.split(",") if x.strip()],
-                        default=None,
-                        help="Backtest a COMBINED prop instead of --stat: a comma-separated "
-                             "list of stats to sum, e.g. --combo points,rebounds,assists.")
-    parser.add_argument("--n-games", type=int, default=80,
-                        help="How many recent games to pull (default: 80).")
-    parser.add_argument("--min-history", type=int, default=10,
-                        help="Games required before the first prediction (default: 10).")
-    parser.add_argument("--season", default="2025-26",
-                        help="Season to start from (default: 2025-26).")
-    parser.add_argument("--grid", action="store_true",
-                        help="Stress-test a grid of lines around the trailing median.")
-    parser.add_argument("--offsets", type=_parse_offsets, default=None,
-                        help="Custom grid offsets, comma-separated (implies --grid). "
-                             "Use the = form so leading minus signs aren't read as "
-                             "flags, e.g. --offsets=-6,-3,3,6.")
+    parser.add_argument(
+        "player", nargs="?", default="Nikola Jokic", help="Player name (default: Nikola Jokic)."
+    )
+    parser.add_argument("--stat", default="points", help="Stat to backtest (default: points).")
+    parser.add_argument(
+        "--combo",
+        type=lambda s: [x.strip() for x in s.split(",") if x.strip()],
+        default=None,
+        help="Backtest a COMBINED prop instead of --stat: a comma-separated "
+        "list of stats to sum, e.g. --combo points,rebounds,assists.",
+    )
+    parser.add_argument(
+        "--n-games", type=int, default=80, help="How many recent games to pull (default: 80)."
+    )
+    parser.add_argument(
+        "--min-history",
+        type=int,
+        default=10,
+        help="Games required before the first prediction (default: 10).",
+    )
+    parser.add_argument(
+        "--season", default="2025-26", help="Season to start from (default: 2025-26)."
+    )
+    parser.add_argument(
+        "--grid",
+        action="store_true",
+        help="Stress-test a grid of lines around the trailing median.",
+    )
+    parser.add_argument(
+        "--offsets",
+        type=_parse_offsets,
+        default=None,
+        help="Custom grid offsets, comma-separated (implies --grid). "
+        "Use the = form so leading minus signs aren't read as "
+        "flags, e.g. --offsets=-6,-3,3,6.",
+    )
     args = parser.parse_args(argv)
 
     offsets = args.offsets
@@ -309,19 +326,23 @@ def main(argv: list[str] | None = None) -> None:
             args.player, args.combo, n_games=args.n_games, season=args.season
         )
         # data returns most-recent-first; the walk-forward wants oldest-first.
-        chronological = {s.lower(): list(reversed(recent[s.lower()])) for s in args.combo}
-        n = len(next(iter(chronological.values())))
+        chronological_combo = {s.lower(): list(reversed(recent[s.lower()])) for s in args.combo}
+        n = len(next(iter(chronological_combo.values())))
         label = "+".join(args.combo)
         print(f"{args.player} - {label} (combo): {n} games | {mode}\n")
-        results = compare_combo_models(chronological, min_history=args.min_history, offsets=offsets)
+        results = compare_combo_models(
+            chronological_combo, min_history=args.min_history, offsets=offsets
+        )
     else:
         recent = data.get_recent_stats(
             args.player, [args.stat], n_games=args.n_games, season=args.season
         )
         # data returns most-recent-first; the walk-forward wants oldest-first.
-        chronological = list(reversed(recent[args.stat.lower()]))
-        print(f"{args.player} - {args.stat}: {len(chronological)} games | {mode}\n")
-        results = compare_models(chronological, min_history=args.min_history, offsets=offsets)
+        chronological_single = list(reversed(recent[args.stat.lower()]))
+        print(f"{args.player} - {args.stat}: {len(chronological_single)} games | {mode}\n")
+        results = compare_models(
+            chronological_single, min_history=args.min_history, offsets=offsets
+        )
 
     _print_report(results)
 

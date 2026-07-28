@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 import nba_projection_bot.api as api
 
-
 client = TestClient(api.app)
 
 

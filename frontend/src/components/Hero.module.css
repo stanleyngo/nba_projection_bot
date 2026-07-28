@@ -32,6 +32,9 @@
   flex-wrap: wrap;
   gap: 9px;
 }
+.signIn {
+  display: flex;
+}
 .chip {
   text-align: left;
   cursor: pointer;
