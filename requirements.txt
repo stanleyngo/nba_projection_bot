@@ -4,9 +4,6 @@ numpy==2.5.1
 pandas==3.0.3
 scipy==1.18.0
 
-# testing
-pytest==7.4.2
-
 # LLM agent
 anthropic==0.116.0
 google-auth==2.21.0
@@ -22,7 +19,7 @@ slowapi==0.1.10
 asyncpg==0.31.0
 
 # database
-sqlalchemy==2.0.22
+sqlalchemy==2.0.51
 
 # Config
 python-dotenv==1.2.2
