@@ -1,7 +1,14 @@
+.appRow {
+  display: flex;
+  height: 100dvh;
+}
+
 .app {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  flex: 1 1 auto;
+  min-width: 0; /* let this column shrink below its content's natural width */
+  height: 100%;
 }
 
 .scroll {

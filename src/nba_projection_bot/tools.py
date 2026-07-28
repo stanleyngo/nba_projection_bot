@@ -1,5 +1,5 @@
 """
-tools.py — Stage 3: wrap data.py / simulation.py as Anthropic tool-use tools.
+tools.py: wrap data.py / simulation.py as Anthropic tool-use tools.
 """
 
 import asyncio
@@ -10,22 +10,19 @@ import nba_projection_bot.data as data
 import nba_projection_bot.rag as rag
 import nba_projection_bot.simulation as simulation
 
+
 @dataclass
 class ToolEntry:
     description: str
     input_schema: dict
     function: Callable
 
+
 TOOL_REGISTRY: dict[str, ToolEntry] = {}
 
 # WEB_SEARCH_TOOL is a SERVER-SIDE tool — Anthropic runs the actual search
 # on their own infrastructure, so unlike everything in TOOL_REGISTRY there's
 # no Python function behind it and it's never dispatched through call_tool.
-# It deliberately does NOT go through @register_tool/TOOL_REGISTRY (that
-# registry's whole shape assumes a backing function to call) — it's just
-# included directly in get_tool_schemas()'s returned list, so agent.py can
-# treat "every tool the model should see" as one call to that function
-# without needing to know this one exists as a special case.
 WEB_SEARCH_TOOL = {
     "type": "web_search_20250305",
     "name": "web_search",
@@ -58,6 +55,7 @@ def register_tool(name: str, description: str, input_schema: dict):
             function=func,
         )
         return func
+
     return decorator
 
 
@@ -80,7 +78,10 @@ def get_tool_schemas() -> list[dict]:
     {
         "type": "object",
         "properties": {
-            "player_name": {"type": "string", "description": "The player's name (first, last, or full)."},
+            "player_name": {
+                "type": "string",
+                "description": "The player's name (first, last, or full).",
+            },
             "stats": {
                 "type": "array",
                 "items": {
@@ -99,7 +100,6 @@ def get_tool_schemas() -> list[dict]:
         "required": ["player_name", "stats"],
     },
 )
-
 async def get_player_recent_stats(player_name: str, stats: list[str], n_games: int = 15) -> dict:
     return await asyncio.to_thread(data.get_recent_stats, player_name, stats, n_games=n_games)
 
@@ -113,7 +113,10 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
     {
         "type": "object",
         "properties": {
-            "player_name": {"type": "string", "description": "The player's name (first, last, or full)."},
+            "player_name": {
+                "type": "string",
+                "description": "The player's name (first, last, or full).",
+            },
             "stat": {
                 "type": "string",
                 "enum": list(data.STAT_COLUMNS),
@@ -132,7 +135,8 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
                 "type": "integer",
                 "minimum": 1,
                 "maximum": data.MAX_N_GAMES,
-                "description": "The number of recent games to consider for the projection (default: 15).",
+                "description": "The number of recent games to consider for the projection"
+                " (default: 15).",
             },
             "injury_status": {
                 "type": "string",
@@ -148,9 +152,16 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
         "required": ["player_name", "stat"],
     },
 )
-
-async def project_stat_over_line(player_name: str, stat: str, line: float | None = None, n_games: int = 15, injury_status: str | None = None) -> dict:
-    values_dict = await asyncio.to_thread(data.get_recent_stats, player_name, [stat], n_games=n_games)
+async def project_stat_over_line(
+    player_name: str,
+    stat: str,
+    line: float | None = None,
+    n_games: int = 15,
+    injury_status: str | None = None,
+) -> dict:
+    values_dict = await asyncio.to_thread(
+        data.get_recent_stats, player_name, [stat], n_games=n_games
+    )
     values = values_dict[stat.lower()]
     return simulation.project_stat(values, line, injury_status=injury_status)
 
@@ -167,7 +178,10 @@ async def project_stat_over_line(player_name: str, stat: str, line: float | None
     {
         "type": "object",
         "properties": {
-            "player_name": {"type": "string", "description": "The player's name (first, last, or full)."},
+            "player_name": {
+                "type": "string",
+                "description": "The player's name (first, last, or full).",
+            },
             "stats": {
                 "type": "array",
                 "items": {
@@ -189,7 +203,8 @@ async def project_stat_over_line(player_name: str, stat: str, line: float | None
                 "type": "integer",
                 "minimum": 1,
                 "maximum": data.MAX_N_GAMES,
-                "description": "The number of recent games to consider for the projection (default: 15).",
+                "description": "The number of recent games to consider for the projection"
+                " (default: 15).",
             },
             "injury_status": {
                 "type": "string",
@@ -205,9 +220,16 @@ async def project_stat_over_line(player_name: str, stat: str, line: float | None
         "required": ["player_name", "stats"],
     },
 )
-
-async def project_combo_over_line(player_name: str, stats: list[str], line: float | None = None, n_games: int = 15, injury_status: str | None = None) -> dict:
-    values_dict = await asyncio.to_thread(data.get_recent_stats, player_name, stats, n_games=n_games)
+async def project_combo_over_line(
+    player_name: str,
+    stats: list[str],
+    line: float | None = None,
+    n_games: int = 15,
+    injury_status: str | None = None,
+) -> dict:
+    values_dict = await asyncio.to_thread(
+        data.get_recent_stats, player_name, stats, n_games=n_games
+    )
     return simulation.project_combo_stat(values_dict, line, injury_status=injury_status)
 
 
@@ -225,7 +247,10 @@ async def project_combo_over_line(player_name: str, stats: list[str], line: floa
     {
         "type": "object",
         "properties": {
-            "player_name": {"type": "string", "description": "The player's name (first, last, or full)."},
+            "player_name": {
+                "type": "string",
+                "description": "The player's name (first, last, or full).",
+            },
         },
         "required": ["player_name"],
     },
@@ -240,16 +265,18 @@ async def call_tool(name: str, tool_input: dict) -> dict:
     return await TOOL_REGISTRY[name].function(**tool_input)
 
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
     import json
 
     schemas = get_tool_schemas()
     print("registered tool schemas:", json.dumps(schemas, indent=2))
 
-    result = asyncio.run(call_tool(
-        "project_stat_over_line",
-        {"player_name": "Nikola Jokic", "stat": "points", "line": 25.5, "n_games": 15},
-    ))
+    result = asyncio.run(
+        call_tool(
+            "project_stat_over_line",
+            {"player_name": "Nikola Jokic", "stat": "points", "line": 25.5, "n_games": 15},
+        )
+    )
     print("call_tool result:", json.dumps(result, indent=2))
 
     print("rag results:", asyncio.run(get_player_news_context("Nikola Jokic")))

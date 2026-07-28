@@ -1,3 +1,4 @@
+import { GoogleLogin, type CredentialResponse } from "@react-oauth/google";
 import styles from "./Hero.module.css";
 
 const SUGGESTIONS = [
@@ -7,7 +8,15 @@ const SUGGESTIONS = [
   { k: "news", t: "What's the latest on LeBron?" },
 ];
 
-export default function Hero({ onPick }: { onPick: (text: string) => void }) {
+export default function Hero({
+  onPick,
+  signedOut = false,
+  onSignIn,
+}: {
+  onPick: (text: string) => void;
+  signedOut?: boolean;
+  onSignIn?: (credentialResponse: CredentialResponse) => void;
+}) {
   return (
     <section className={styles.hero}>
       <div className={styles.eyebrow}>NBA prop projections</div>
@@ -15,17 +24,31 @@ export default function Hero({ onPick }: { onPick: (text: string) => void }) {
         Will he go <span className={styles.u}>over?</span>
       </h1>
       <p className={styles.lede}>
-        Ask about any player's points, rebounds, or assists — or a combo like PRA. You'll
-        get a model-based read on the line, straight from their recent games.
+        {signedOut
+          ? "Sign in with Google below to start asking about a player's projection."
+          : "Ask about any player's points, rebounds, or assists — or a combo like PRA. You'll get a model-based read on the line, straight from their recent games."}
       </p>
-      <div className={styles.chips}>
-        {SUGGESTIONS.map((s) => (
-          <button key={s.t} className={styles.chip} type="button" onClick={() => onPick(s.t)}>
-            <span className={styles.k}>{s.k}</span>
-            {s.t}
-          </button>
-        ))}
-      </div>
+      {signedOut ? (
+        onSignIn && (
+          <div className={styles.signIn}>
+            <GoogleLogin
+              onSuccess={onSignIn}
+              onError={() => console.error("Google sign-in failed")}
+              theme="filled_black"
+              shape="pill"
+            />
+          </div>
+        )
+      ) : (
+        <div className={styles.chips}>
+          {SUGGESTIONS.map((s) => (
+            <button key={s.t} className={styles.chip} type="button" onClick={() => onPick(s.t)}>
+              <span className={styles.k}>{s.k}</span>
+              {s.t}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

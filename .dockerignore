@@ -1,0 +1,16 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+frontend/node_modules/
+frontend/dist/
+
+# Never bake secrets into an image — env vars get set in Render's
+# dashboard instead. An image can end up pushed to a registry, cached in
+# build layers, or shared long after you've forgotten it exists; a
+# secret baked in at build time doesn't get removed just because you
+# later delete the file from your repo.
+.env

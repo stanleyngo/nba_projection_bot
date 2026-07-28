@@ -9,6 +9,7 @@ pytest==7.4.2
 
 # LLM agent
 anthropic==0.116.0
+google-auth==2.21.0
 
 # RAG (recent-news retrieval in rag.py)
 tavily-python==0.7.26
@@ -18,6 +19,7 @@ voyageai==0.5.0
 fastapi==0.139.0
 uvicorn==0.51.0
 slowapi==0.1.10
+asyncpg==1.0.0
 
 # database
 sqlalchemy==2.0.22

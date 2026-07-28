@@ -39,3 +39,20 @@ export interface AskResponse {
   projections: Projection[];
   news: NewsContext[];
 }
+
+// Mirrors GET /conversations (api.py ConversationSummary).
+export interface ConversationSummary {
+  id: number;
+  title: string | null;
+  created_at: string;
+}
+
+// Mirrors GET /conversations/{id} (api.py ConversationHistoryResponse).
+// projections/news are only ever populated on assistant messages — empty
+// on user messages and on assistant messages that surfaced no cards.
+export interface ConversationHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+  projections: Projection[];
+  news: NewsContext[];
+}

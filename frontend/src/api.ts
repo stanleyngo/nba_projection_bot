@@ -1,19 +1,29 @@
-import type { AskResponse } from "./types";
+import type { AskResponse, ConversationHistoryMessage, ConversationSummary } from "./types";
 
 /**
  * POST a question to the backend. Returns the parsed AskResponse, or throws an
  * Error whose message is already user-friendly (mirrors the error mapping from
- * the original static frontend: 429 / 400 / 502 / network).
+ * the original static frontend: 401 / 429 / 400 / 502 / network).
+ *
+ * `idToken` is the Google ID token from sign-in (see App.tsx) — sent as a
+ * Bearer token, which is how the backend's get_current_user_id verifies who's
+ * actually calling. There's no "logged out" mode for asking questions: the
+ * backend requires a valid token on every /ask call, so the caller must not
+ * invoke this without one (App.tsx gates the composer on being signed in).
  */
 export async function askBackend(
   question: string,
   conversationId: number | null,
+  idToken: string,
 ): Promise<AskResponse> {
   let res: Response;
   try {
     res = await fetch("/ask", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`,
+      },
       body: JSON.stringify({ question, conversation_id: conversationId }),
     });
   } catch {
@@ -28,7 +38,32 @@ export async function askBackend(
   return (await res.json()) as AskResponse;
 }
 
+/** GET the signed-in user's conversation list, for the sidebar. */
+export async function fetchConversations(idToken: string): Promise<ConversationSummary[]> {
+  const res = await fetch("/conversations", {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return (await res.json()) as ConversationSummary[];
+}
+
+/** GET one past conversation's message history, for switching to it. */
+export async function fetchConversationHistory(
+  conversationId: number,
+  idToken: string,
+): Promise<ConversationHistoryMessage[]> {
+  const res = await fetch(`/conversations/${conversationId}`, {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  const data = (await res.json()) as { messages: ConversationHistoryMessage[] };
+  return data.messages;
+}
+
 async function errorMessage(res: Response): Promise<string> {
+  if (res.status === 401) {
+    return "Your sign-in has expired. Please sign in again.";
+  }
   if (res.status === 429) {
     return "You're asking a little fast — give it a minute and try again.";
   }
