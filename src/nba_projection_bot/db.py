@@ -23,10 +23,12 @@ internal loop generates while answering a single question. Two reasons:
 """
 
 import datetime
+import enum
 from os import getenv
 
 from dotenv import load_dotenv
 from sqlalchemy import JSON, ForeignKey, Text, func, select
+from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -34,6 +36,15 @@ load_dotenv()
 database_url = getenv("DATABASE_URL")
 if not database_url:
     raise RuntimeError("DATABASE_URL must be set.")
+
+
+class JobStatus(str, enum.Enum):
+    queued = "queued"
+    fetching = "fetching"
+    simulating = "simulating"
+    summarizing = "summarizing"
+    done = "done"
+    failed = "failed"
 
 
 class Base(DeclarativeBase):
@@ -77,6 +88,35 @@ class Message(Base):
     projections: Mapped[list | None] = mapped_column(JSON, default=None)
     news: Mapped[list | None] = mapped_column(JSON, default=None)
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
+
+
+class DeepAnalysisJob(Base):
+    __tablename__ = "deep_analysis_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    player_name: Mapped[str]
+    # Nullable only because rows created before this column existed have no
+    # value for it — every row created going forward always has one
+    # (resolved once, at submission time, and reused by the produce-retry
+    # loop so it never needs to re-resolve the player name).
+    player_id: Mapped[int | None] = mapped_column(default=None)
+    status: Mapped[JobStatus] = mapped_column(default=JobStatus.queued.value)
+    result: Mapped[str | None] = mapped_column(Text, default=None)
+    error: Mapped[str | None] = mapped_column(default=None)
+    retry_count: Mapped[int] = mapped_column(default=0)
+    # False until the job's Kafka message is confirmed delivered — see
+    # claim_job_for_producing/release_job_for_producing and api.py's
+    # produce-retry loop. Distinct from `status`: a job can be `queued` and
+    # NOT YET produced (never reached Kafka, waiting on the retry loop) or
+    # `queued` and already produced (delivered fine, just waiting for a
+    # worker to consume it) — `status` alone can't tell these apart.
+    produced: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
 
 
 engine = create_async_engine(database_url, pool_pre_ping=True)
@@ -203,5 +243,97 @@ async def load_history(conversation_id: int, user_id: int) -> list[dict]:
                 "projections": row.projections or [],
                 "news": row.news or [],
             }
+            for row in result.fetchall()
+        ]
+
+
+async def list_deep_analysis_jobs(user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                DeepAnalysisJob.id,
+                DeepAnalysisJob.player_name,
+                DeepAnalysisJob.status,
+                DeepAnalysisJob.produced,
+                DeepAnalysisJob.created_at,
+            )
+            .where(DeepAnalysisJob.user_id == user_id)
+            .order_by(DeepAnalysisJob.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return [
+            {
+                "id": row.id,
+                "player_name": row.player_name,
+                "status": row.status,
+                "produced": row.produced,
+                "created_at": row.created_at,
+            }
+            for row in result.fetchall()
+        ]
+
+
+async def get_deep_analysis_job(job_id: int, user_id: int) -> dict:
+    async with async_session() as session:
+        job = await session.get(DeepAnalysisJob, job_id)
+        if job is None or job.user_id != user_id:
+            raise PermissionError("This job does not belong to this user.")
+        return {
+            "status": job.status,
+            "result": job.result,
+            "error": job.error,
+            "produced": job.produced,
+            "created_at": job.created_at,
+        }
+
+
+async def claim_job_for_producing(job_id: int) -> bool:
+    """
+    Atomically mark one job as claimed for producing to Kafka — returns True
+    only if THIS call is the one that flipped `produced` False -> True.
+
+    This exists because a job can be produced from two different places: the
+    original request handler's own synchronous attempt, and the background
+    produce-retry loop (see api.py) picking it up later. Without an atomic
+    claim, both could race to produce the same job at once, resulting in a
+    duplicate Kafka message for the same job_id. Whichever caller loses the
+    race (gets False back) must not attempt to produce at all.
+
+    If the actual produce attempt fails after successfully claiming here,
+    the caller must call release_job_for_producing so it's retried later —
+    claiming is not the same as succeeding.
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            sql_update(DeepAnalysisJob)
+            .where(DeepAnalysisJob.id == job_id, DeepAnalysisJob.produced.is_(False))
+            .values(produced=True)
+            .returning(DeepAnalysisJob.id)
+        )
+        claimed_id = result.scalar_one_or_none()
+        await session.commit()
+        return claimed_id is not None
+
+
+async def release_job_for_producing(job_id: int) -> None:
+    """Revert a claim after a produce attempt failed, so it's retried later."""
+    async with async_session() as session:
+        job = await session.get(DeepAnalysisJob, job_id)
+        if job is not None:
+            job.produced = False
+            await session.commit()
+
+
+async def list_unproduced_jobs() -> list[dict]:
+    """Every job whose Kafka message has never been confirmed delivered."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                DeepAnalysisJob.id, DeepAnalysisJob.player_name, DeepAnalysisJob.player_id
+            ).where(DeepAnalysisJob.produced.is_(False))
+        )
+        return [
+            {"id": row.id, "player_name": row.player_name, "player_id": row.player_id}
             for row in result.fetchall()
         ]

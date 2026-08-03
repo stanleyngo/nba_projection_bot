@@ -1,0 +1,86 @@
+.title {
+  font-family: "Saira Condensed", sans-serif;
+  font-weight: 700;
+  font-size: 24px;
+  text-transform: uppercase;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0 0 8px;
+}
+.lede {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 13.5px;
+  color: var(--muted);
+  margin: 0 0 18px;
+  max-width: 42ch;
+}
+.input {
+  width: 100%;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 14.5px;
+  padding: 11px 13px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input::placeholder {
+  color: var(--faint);
+}
+.input:focus {
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 3px rgba(232, 98, 44, 0.12);
+}
+.input:disabled {
+  opacity: 0.6;
+}
+.error {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--red);
+}
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 18px;
+}
+.cancel {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  padding: 9px 15px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.cancel:hover:not(:disabled) {
+  color: var(--text);
+  border-color: #33404f;
+  background: var(--bg-elev);
+}
+.submit {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #170a04;
+  background: var(--accent);
+  border: none;
+  padding: 9px 16px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.submit:hover:not(:disabled) {
+  background: #f56f38;
+}
+.submit:disabled {
+  background: #33404f;
+  color: #6a7482;
+  cursor: not-allowed;
+}

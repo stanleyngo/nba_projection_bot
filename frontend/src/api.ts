@@ -1,4 +1,11 @@
-import type { AskResponse, ConversationHistoryMessage, ConversationSummary } from "./types";
+import type {
+  AskResponse,
+  ConversationHistoryMessage,
+  ConversationSummary,
+  DeepAnalysisJobRef,
+  DeepAnalysisJobResponse,
+  DeepAnalysisJobSummary,
+} from "./types";
 
 /**
  * POST a question to the backend. Returns the parsed AskResponse, or throws an
@@ -58,6 +65,56 @@ export async function fetchConversationHistory(
   if (!res.ok) throw new Error(await errorMessage(res));
   const data = (await res.json()) as { messages: ConversationHistoryMessage[] };
   return data.messages;
+}
+
+/** POST a request for a deep analysis report for a player */
+export async function requestDeepAnalysis(
+  playerName: string,
+  idempotencyKey: string,
+  idToken: string,
+): Promise<DeepAnalysisJobRef> {
+  let res: Response;
+  try {
+    res = await fetch("/deep-analysis", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`,
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify({ player_name: playerName }),
+    });
+  } catch {
+    throw new Error(
+      "Couldn't reach the server. Check that the API is running, then try again.",
+    );
+  }
+
+  if (!res.ok) {
+    throw new Error(await errorMessage(res));
+  }
+  return (await res.json()) as DeepAnalysisJobRef;
+}
+
+/** GET the signed-in user's past deep-analysis reports, for the sidebar. */
+export async function fetchDeepAnalysisJobs(idToken: string): Promise<DeepAnalysisJobSummary[]> {
+  const res = await fetch("/deep-analysis", {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return (await res.json()) as DeepAnalysisJobSummary[];
+}
+
+/** GET the status for a deep analysis job and results if finished */
+export async function fetchDeepAnalysisStatus(
+  jobId: number,
+  idToken: string,
+): Promise<DeepAnalysisJobResponse> {
+  const res = await fetch(`/deep-analysis/${jobId}`, {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return (await res.json()) as DeepAnalysisJobResponse;
 }
 
 async function errorMessage(res: Response): Promise<string> {

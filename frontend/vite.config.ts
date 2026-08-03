@@ -4,7 +4,8 @@ import react from "@vitejs/plugin-react";
 
 // The build lands in the Python package's static/ dir so FastAPI serves it
 // directly (see api.py). In dev, these paths proxy to the running API —
-// "/conversations" as a prefix also covers "/conversations/{id}".
+// "/conversations" as a prefix also covers "/conversations/{id}", and
+// "/deep-analysis" likewise covers "/deep-analysis/{job_id}".
 export default defineConfig({
   plugins: [react()],
   build: {
@@ -16,6 +17,7 @@ export default defineConfig({
       "/ask": "http://127.0.0.1:8000",
       "/health": "http://127.0.0.1:8000",
       "/conversations": "http://127.0.0.1:8000",
+      "/deep-analysis": "http://127.0.0.1:8000",
     },
   },
   test: {

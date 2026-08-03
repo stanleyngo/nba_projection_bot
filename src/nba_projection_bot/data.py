@@ -10,6 +10,7 @@ current nba_api docs.
 """
 
 import io
+import json
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -74,11 +75,14 @@ release_lock_script = redis_client.register_script("""
     end
 """)
 
+
 def _cache_key(player_id: int, season: str, season_type: str) -> str:
     return f"nba:gamelog:{player_id}:{season}:{season_type}"
 
+
 def _release_lock(lock_key: str, token: str) -> bool:
     return release_lock_script(keys=[lock_key], args=[token])
+
 
 # expiring cache at 2am EST because all games are basically guaranteed
 # to be finished by then
@@ -105,7 +109,13 @@ def _fetch_from_nba_api(player_id: int, season: str, season_type: str) -> pd.Dat
                 proxy=NBA_API_PROXY,
             )
             return log.get_data_frames()[0]
-        except requests.exceptions.RequestException:
+        # requests.exceptions.RequestException covers network-level failures
+        # (timeouts, connection errors). json.JSONDecodeError covers a
+        # different failure mode: stats.nba.com (or the proxy in front of
+        # it) returning a 200 OK with an empty/invalid body — nba_api's own
+        # response.json() call raises this, and requests never sees it as
+        # an error, so it needs to be retried here explicitly too.
+        except (requests.exceptions.RequestException, json.JSONDecodeError):
             if attempt == MAX_RETRY_ATTEMPTS:
                 raise
             time.sleep(RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
@@ -214,7 +224,12 @@ def get_recent_stats(
     current_season = season
     while len(values[stats[0]]) < n_games:
         found_this_season = False
-        for season_type in (SeasonTypePlayoffs.playoffs, SeasonTypePlayoffs.regular):
+        season_types = (
+            SeasonTypePlayoffs.playoffs,
+            SeasonTypePlayoffs.playin,
+            SeasonTypePlayoffs.regular,
+        )
+        for season_type in season_types:
             if len(values[stats[0]]) >= n_games:
                 break  # playoffs alone covered it — skip the regular-season call
             df = _fetch_game_log(player_id, current_season, season_type)
@@ -227,6 +242,43 @@ def get_recent_stats(
         if not found_this_season:
             break  # no data this season or earlier — before the player's career
         current_season = _season_before(current_season)
+
+    if not values[stats[0]]:
+        raise ValueError(f"No games found for {player_name} in or before {season}")
+
+    return values
+
+
+def get_full_season_stats(
+    player_name: str,
+    stats: list[str],
+    season: str = CURRENT_SEASON,
+) -> dict[str, list[int]]:
+    """
+    Returns a player's values for each stat in 'stats'
+    for the current or last finished season.
+
+    Raises ValueError if a stat is unsupported or the player isn't found.
+    """
+    stats = [s.lower() for s in stats]
+    unknown = [s for s in stats if s not in STAT_COLUMNS]
+    if unknown:
+        raise ValueError(f"Unsupported stat(s) {unknown}. Supported: {list(STAT_COLUMNS)}")
+
+    player_id = resolve_player_id(player_name)
+    if player_id is None:
+        raise ValueError(f"Player '{player_name}' not found")
+
+    values: dict[str, list[int]] = {stat: [] for stat in stats}
+    season_types = (
+        SeasonTypePlayoffs.playoffs,
+        SeasonTypePlayoffs.playin,
+        SeasonTypePlayoffs.regular,
+    )
+    for season_type in season_types:
+        df = _fetch_game_log(player_id, season, season_type)
+        for stat in stats:
+            values[stat].extend(int(v) for v in df[STAT_COLUMNS[stat]])
 
     if not values[stats[0]]:
         raise ValueError(f"No games found for {player_name} in or before {season}")

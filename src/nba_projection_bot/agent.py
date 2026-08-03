@@ -18,7 +18,9 @@ from dotenv import load_dotenv
 
 import nba_projection_bot.db as db
 import nba_projection_bot.tools as tools
-from nba_projection_bot.prompts import SYSTEM_PROMPT
+from nba_projection_bot.prompts import DEEP_ANALYSIS_SYSTEM_PROMPT, SYSTEM_PROMPT
+
+load_dotenv()
 
 MODEL = "claude-sonnet-4-5"
 MAX_TOKENS = 2048
@@ -31,6 +33,8 @@ PROJECTION_TOOLS = frozenset({"project_stat_over_line", "project_combo_over_line
 
 # The RAG tool whose news/analysis result the UI renders as a News & Analysis card.
 NEWS_TOOL = "get_player_news_context"
+
+anthropic_client = anthropic.AsyncAnthropic()
 
 
 def is_projection_tool(name: str) -> bool:
@@ -62,13 +66,13 @@ def news_record(tool_input: dict, result: dict) -> dict:
 TITLE_MODEL = "claude-haiku-4-5"
 
 
-async def generate_title(client: anthropic.AsyncAnthropic, user_message: str, answer: str) -> str:
+async def generate_title(user_message: str, answer: str) -> str:
     """
     Generate a short (3-6 word) title for a new conversation, for the
     sidebar. Uses a cheap/fast model — this is a small auxiliary task, not
     something that needs the main model's full capability.
     """
-    response = await client.messages.create(
+    response = await anthropic_client.messages.create(
         model=TITLE_MODEL,
         max_tokens=20,
         messages=[
@@ -87,6 +91,35 @@ async def generate_title(client: anthropic.AsyncAnthropic, user_message: str, an
     text_blocks = [block for block in response.content if block.type == "text"]
     if not text_blocks:
         return user_message[:50]  # fallback: just truncate the question itself
+    return text_blocks[0].text.strip()
+
+
+async def generate_report(simulated_stats: dict[str, dict], news: dict[str, list[dict]]) -> str:
+    """
+    Generates a deep analysis report of a player given their stats for a whole season
+    and recent news about them.
+    """
+
+    response = await anthropic_client.messages.create(
+        model=MODEL,
+        max_tokens=3072,
+        system=[
+            {
+                "type": "text",
+                "text": DEEP_ANALYSIS_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": json.dumps({"simulated_stats": simulated_stats, "news": news}),
+            }
+        ],
+    )
+    text_blocks = [block for block in response.content if block.type == "text"]
+    if not text_blocks:
+        raise ValueError("Expected at least one text block in the report response.")
     return text_blocks[0].text.strip()
 
 
@@ -163,9 +196,6 @@ async def run_agent(
       thing that ties separate requests back into one conversation.
     """
 
-    load_dotenv()
-    anthropic_client = anthropic.AsyncAnthropic()
-
     is_new_conversation = conversation_id is None
     if conversation_id is None:
         conversation_id = await db.create_conversation(user_id)
@@ -216,7 +246,7 @@ async def run_agent(
             )
             if is_new_conversation:
                 try:
-                    title = await generate_title(anthropic_client, user_message, answer)
+                    title = await generate_title(user_message, answer)
                     await db.set_conversation_title(conversation_id, title)
                 except Exception:
                     logging.exception(f"Title generation failed for conversation {conversation_id}")
