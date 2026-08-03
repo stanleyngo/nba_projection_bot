@@ -1,0 +1,59 @@
+# Architecture Decisions
+
+A running log of significant architectural decisions for this project and the reasoning behind them. This is not a changelog of every code change — only choices that involved a real tradeoff, so the reasoning survives even after the code around it changes.
+
+## Caching: Redis, keyed by player_id + season + season_type
+
+Implemented directly against Redis (Render Key Value / Valkey), skipping an in-process cache layer — the app runs at `WEB_CONCURRENCY=1`, so there's no live multi-instance-disagreement scenario to guard against locally anyway, and the data was headed to Redis regardless. Cache-aside sits at the lowest-level fetch function (`_fetch_game_log`), not higher up, so every `n_games`/stat combination for the same player-season shares one cache entry. TTL is computed fresh on each write as seconds-until-next-2AM-EST (a fixed real-world cutover — games are done by then), not a rolling window. Thundering herd is handled with a per-key Redis lock (`SET NX PX` + a fencing token) and an atomic Lua compare-then-delete on release. Fails open on `redis.exceptions.RedisError` — falls back to a direct nba_api call rather than taking the feature down over what should be a pure optimization.
+
+## Kafka for the deep-analysis job queue, despite being more tool than the job needs
+
+The actual job-queue problem (single consumer, one job type) doesn't need Kafka's ordering/partitioning machinery — a simpler queue would suffice. Chosen anyway, deliberately, because real Kafka experience was an explicit goal for job-market reasons, and this was the naturally-fitting place to get it. Framed honestly as a learning trade, not a scale requirement.
+
+## Kafka messages carry only a job_id, not the full payload ("thin message, fat state")
+
+`produce_job_event` publishes `{"job_id": job_id}` — nothing else. The consumer (`worker.py`) looks up everything else (`player_name`, current `status`, `retry_count`, ...) fresh from Postgres on every invocation, including retries. This means Postgres is the single source of truth for a job's state, and a message is only ever a pointer to it, never a stale snapshot. This is what makes safe retries possible later — if the message itself carried job data, a retry could work off data that's since drifted from what's actually true.
+
+## Job retries happen inside `process_job`, not via Kafka redelivery
+
+Originally, a failed job was marked `queued` and the handler `raise`d, relying on the message staying uncommitted so Kafka would redeliver it later. This does not work reliably: a Kafka partition's committed offset is a single per-partition watermark, not a per-message acknowledgment — if *any* later message in the partition succeeds and commits before the failed one is retried, that commit implicitly (and silently) marks the earlier failed message as done too, permanently, even across a consumer restart. Separately, even when that doesn't happen, redelivery only occurs when a *new* consumer session begins (a crash, a redeploy, a rebalance) — which has no defined timing and may not happen for a long time in a stable deployment. Both problems come from using Kafka's delivery-guarantee mechanism as a stand-in for an application-level retry scheduler, which it isn't designed to be.
+
+Fixed by moving retries inside `process_job` itself: a bounded loop with backoff, retried entirely within one call, only returning to `main()` once a job reaches an actual terminal state (`done`, or `failed` + sent to the DLQ). `main()` only ever needs to decide "commit or don't" based on whether `process_job` returned normally — it no longer needs Kafka to redeliver anything for a job-level retry to happen.
+
+Accepted trade-off: because `main()`'s consumer loop is single-threaded and sequential, an in-flight retry blocks all other jobs (including from other users) until it resolves or gives up. At this project's scale that's a deliberate, named simplification — see "Deep-analysis jobs process fully sequentially" below for the full reasoning and what a real fix looks like.
+
+## `process_job` short-circuits on an already-terminal job
+
+Guards on `job.status in (done, failed)` at the top of `process_job` and returns immediately. This exists because Kafka redelivery (a worker crash between finishing a job and committing its offset) can hand the same message to `process_job` again after it already reached a terminal state — without this guard, that would silently redo the entire pipeline (including a second LLM call) for a job that already succeeded or was already dead-lettered, and could produce a duplicate DLQ entry.
+
+## Deep-analysis jobs process fully sequentially — one worker instance, no concurrency
+
+With one Kafka partition and one running instance of `worker.py`, and `main()`'s loop awaiting each job to completion before polling the next, two users submitting requests close together are fully serialized — the second person's job doesn't start until the first's entire pipeline (fetch, simulate, RAG, LLM call) finishes, success or failure. Kafka's standard fix for this is more partitions plus more consumer instances in the same group (partitions are automatically split across members). Handling it via concurrency inside one instance instead is possible but re-introduces the same offset-watermark correctness problem described above (a later job finishing first and committing past an earlier one still in flight) — not adopted for that reason. Left as-is for now; horizontal scaling is the correct lever if/when this actually needs fixing.
+
+## Idempotency key protects job *creation*, not job *processing* — these are different problems
+
+`idempotency_key` (client-generated, unique-constrained, `INSERT ... ON CONFLICT DO NOTHING`) prevents the same logical submission (e.g. a retried POST) from creating two job rows / two Kafka messages. It says nothing about what happens to a job *after* it's created — a worker crash mid-job and subsequent Kafka redelivery is a completely different failure mode, handled separately by the `process_job` terminal-status guard above, not by the idempotency key.
+
+## Deep-analysis report UI: modal-based, not inline in the chat stream
+
+Triggering deep analysis via natural language in the chat agent was considered and rejected — the chat model has no tool wired for it and no reasonable way to distinguish "give me a projection" from "run a multi-second async job" from phrasing alone, and blocking a synchronous `/ask` turn on an inherently async job would defeat the entire reason the job queue exists. Chosen instead: a dedicated request modal (player name input) reachable from a Hero suggestion chip and a Topbar button, with results shown in a separate report modal and history in the sidebar — decoupled from the conversational chat flow entirely.
+
+## Deep-analysis polling: one shared poll loop in App.tsx, not one per open modal
+
+The report modal itself does not poll — it's purely presentational, fed by state owned in `App.tsx`. This is because a job needs to keep being tracked (for the completion notification) even after its modal is closed, and because polling per-job-per-open-modal would double-count request volume against the same rate-limited endpoint whenever a modal happened to be open while the background tracker was also running.
+
+The recurring poll further calls `GET /deep-analysis` (the list endpoint) once per tick, regardless of how many jobs are being tracked, rather than polling each tracked job's `GET /deep-analysis/{job_id}` individually. The per-job endpoint is only called once, right when a job's status (per the list) newly reaches a terminal state, to fetch the `result`/`error` the list summary doesn't carry. This keeps total polling volume flat (~1 request per tick) instead of scaling linearly with how many jobs a user happens to have in flight — the earlier version of this (one request per tracked job per tick) could itself trip the very rate limit that was raised specifically to accommodate polling.
+
+## Producer delivery failures are not silently swallowed
+
+`producer.produce()` is fire-and-forget — a broker being unreachable does not raise an exception at the call site. An `on_delivery` callback plus checking `producer.flush()`'s return value (messages still pending after its timeout) are both required to actually detect a failed publish; neither alone is sufficient; see reasoning in-thread. When a publish fails after a job row already exists, the row is marked `failed` (not left at `queued`) with a user-facing friendly message, and the real exception is logged server-side via `logging.exception` — leaving it `queued` would misrepresent the situation, since nothing is currently watching for jobs that failed to ever reach Kafka to retry publishing them (see open item below).
+
+## Producer-failure recovery: polling publisher (transactional outbox), not CDC
+
+Considered CDC (Debezium + Kafka Connect) instead, since it was already on the roadmap as a stretch goal — decided against it for this specific problem: that roadmap item was scoped as a local Docker Compose learning exercise, decoupled from the real app. Using it to fix a real production problem would mean running Debezium + Kafka Connect against the actual hosted Aiven Postgres (gated on whether that plan even supports logical replication) plus standing up somewhere to run Kafka Connect persistently — real infrastructure and cost, not justified here. A polling publisher gets the same guarantee (an event is eventually published, no matter how long Kafka is unreachable) with none of that — and is a common, standard implementation of the outbox pattern in its own right, not merely a lesser substitute for CDC. Particularly apt here since the Kafka service is expected to be *asleep* the large majority of the time (free-tier, shuts down after inactivity) — this needs to be a genuine recovery mechanism, not just something that smooths over brief blips.
+
+Implementation: `DeepAnalysisJob` gained two columns — `player_id` (resolved once at submission time and persisted, so a later retry never needs to re-resolve the player name) and `produced` (false until the Kafka message is confirmed delivered; distinct from `status`, since `status: queued` alone can't tell "never reached Kafka" apart from "delivered fine, just not yet consumed by a worker"). `POST /deep-analysis` now always returns success once the DB row is written, regardless of whether the synchronous produce attempt succeeds — a produce failure is logged server-side and the job is left `produced: false` rather than marked `failed`. A background task (`_retry_unproduced_jobs`, started in `lifespan`) polls every 30s for unproduced jobs and retries publishing them, indefinitely — there's no `MAX_JOB_RETRIES`-style cap here, unlike the worker's job-processing retries, because a produce failure is always an infrastructure issue (Kafka unreachable), never something specific to the job that could be permanently invalid.
+
+Closing a race: both the original request handler and the background poller can attempt to produce the same job. `claim_job_for_producing` does an atomic `UPDATE ... WHERE produced = false ... RETURNING id` before either ever calls `produce_job_event` — whichever caller's update actually flips the row wins and proceeds; the other sees no returned row and backs off. If the winning caller's produce attempt itself fails, it must explicitly `release_job_for_producing` (revert to `produced: false`) so the next poll picks it up — claiming and succeeding are different things.
+
+`produced` is now surfaced to the frontend (`DeepAnalysisResponse`/`DeepAnalysisJobSummary`), replacing an earlier time-based heuristic in the report modal (guessing "probably stuck" from how long a job had sat at `queued`) with the actual signal.

@@ -95,7 +95,6 @@ async def embed_texts(texts: list[str], input_type: str) -> list[np.ndarray]:
                 texts, model="voyage-3.5-lite", input_type=input_type
             )
             break
-        # before trusting this catches everything it should.
         except voyageai.error.VoyageError:
             if attempt == MAX_RETRY_ATTEMPTS:
                 raise

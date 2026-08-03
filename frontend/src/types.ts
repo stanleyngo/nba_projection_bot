@@ -56,3 +56,29 @@ export interface ConversationHistoryMessage {
   projections: Projection[];
   news: NewsContext[];
 }
+
+// Mirrors POST /deep-analysis (api.py DeepAnalysisJobRef)
+export interface DeepAnalysisJobRef {
+  job_id: number;
+}
+
+// Mirrors GET /deep-analysis/{job_id} (api.py DeepAnalysisJobResponse).
+// `produced` is false only while `status` is "queued" and the job's Kafka
+// message hasn't been confirmed delivered yet (e.g. the free-tier Kafka
+// service is asleep) — a background retry loop keeps trying until it is.
+export interface DeepAnalysisJobResponse {
+  status: string;
+  result: string | null;
+  error: string | null;
+  produced: boolean;
+  created_at: string;
+}
+
+// Mirrors GET /deep-analysis (api.py DeepAnalysisJobSummary).
+export interface DeepAnalysisJobSummary {
+  id: number;
+  player_name: string;
+  status: string;
+  produced: boolean;
+  created_at: string;
+}

@@ -10,10 +10,12 @@ const SUGGESTIONS = [
 
 export default function Hero({
   onPick,
+  onDeepAnalysis,
   signedOut = false,
   onSignIn,
 }: {
   onPick: (text: string) => void;
+  onDeepAnalysis: () => void;
   signedOut?: boolean;
   onSignIn?: (credentialResponse: CredentialResponse) => void;
 }) {
@@ -47,6 +49,10 @@ export default function Hero({
               {s.t}
             </button>
           ))}
+          <button className={styles.chip} type="button" onClick={onDeepAnalysis}>
+            <span className={styles.k}>deep analysis</span>
+            Generate a full report on a player
+          </button>
         </div>
       )}
     </section>

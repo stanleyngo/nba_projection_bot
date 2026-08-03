@@ -3,10 +3,12 @@ import styles from "./Topbar.module.css";
 
 export default function Topbar({
   onNewChat,
+  onDeepAnalysis,
   signedIn,
   onSignOut,
 }: {
   onNewChat: () => void;
+  onDeepAnalysis: () => void;
   signedIn: boolean;
   onSignIn: (credentialResponse: CredentialResponse) => void;
   onSignOut: () => void;
@@ -20,6 +22,9 @@ export default function Topbar({
       </div>
       {signedIn ? (
         <div className={styles.authArea}>
+          <button className={styles.newchat} type="button" onClick={onDeepAnalysis}>
+            Deep analysis
+          </button>
           <button className={styles.newchat} type="button" onClick={onNewChat}>
             New chat
           </button>
