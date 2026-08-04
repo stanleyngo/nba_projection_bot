@@ -7,6 +7,7 @@ scipy==1.18.0
 # LLM agent
 anthropic==0.116.0
 google-auth==2.21.0
+cachecontrol==0.14.4  # caches Google's signing certs across auth calls
 
 # RAG (recent-news retrieval in rag.py)
 tavily-python==0.7.26
@@ -20,6 +21,7 @@ asyncpg==0.31.0
 
 # database
 sqlalchemy==2.0.51
+alembic==1.19.0
 
 # Config
 python-dotenv==1.2.2

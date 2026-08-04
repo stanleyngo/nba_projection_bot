@@ -22,20 +22,24 @@ internal loop generates while answering a single question. Two reasons:
      asked and answered, to stay coherent as a conversation.
 """
 
+import asyncio
 import datetime
 import enum
-from os import getenv
+from pathlib import Path
 
 from dotenv import load_dotenv
-from sqlalchemy import JSON, ForeignKey, Text, func, select
+from sqlalchemy import JSON, ForeignKey, Text, UniqueConstraint, func, or_, select, text
 from sqlalchemy import update as sql_update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 load_dotenv()
-database_url = getenv("DATABASE_URL")
-if not database_url:
-    raise RuntimeError("DATABASE_URL must be set.")
 
 
 class JobStatus(str, enum.Enum):
@@ -92,9 +96,16 @@ class Message(Base):
 
 class DeepAnalysisJob(Base):
     __tablename__ = "deep_analysis_jobs"
+    # Idempotency keys are scoped PER USER, not globally:
+    # (Applied to the live table by Alembic migration 002.)
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "idempotency_key", name="uq_deep_analysis_jobs_user_id_idempotency_key"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    idempotency_key: Mapped[str] = mapped_column(unique=True)
+    idempotency_key: Mapped[str]
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     player_name: Mapped[str]
     # Nullable only because rows created before this column existed have no
@@ -106,29 +117,81 @@ class DeepAnalysisJob(Base):
     result: Mapped[str | None] = mapped_column(Text, default=None)
     error: Mapped[str | None] = mapped_column(default=None)
     retry_count: Mapped[int] = mapped_column(default=0)
-    # False until the job's Kafka message is confirmed delivered — see
-    # claim_job_for_producing/release_job_for_producing and api.py's
-    # produce-retry loop. Distinct from `status`: a job can be `queued` and
-    # NOT YET produced (never reached Kafka, waiting on the retry loop) or
+    # False until the job's Kafka message is CONFIRMED delivered (set True
+    # only after flush() reports success — never optimistically at claim
+    # time). Distinct from `status`: a job can be `queued` and NOT YET
+    # produced (never reached Kafka, waiting on the retry loop) or
     # `queued` and already produced (delivered fine, just waiting for a
     # worker to consume it) — `status` alone can't tell these apart.
     produced: Mapped[bool] = mapped_column(default=False)
+    # The produce-claim LEASE: set to now() when a caller claims the right
+    # to produce this job (see claim_job_for_producing), cleared on a
+    # confirmed failure. A claim whose holder crashed mid-produce simply
+    # goes stale — once it's older than the lease window, the retry loop
+    # can reclaim the job instead of it being lost forever.
+    produce_claimed_at: Mapped[datetime.datetime | None] = mapped_column(default=None)
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
     )
 
 
-engine = create_async_engine(database_url, pool_pre_ping=True)
-async_session = async_sessionmaker(engine, expire_on_commit=False)
+# Engine/sessionmaker are NOT built at import time
+_engine: AsyncEngine | None = None
+_session_factory: async_sessionmaker[AsyncSession] | None = None
+_database_url: str | None = None
+
+
+def configure(database_url: str) -> None:
+    """Build this process's engine + sessionmaker. Idempotent — a second
+    call is a no-op, so tests/entry points can't double-construct."""
+    global _engine, _session_factory, _database_url
+    if _engine is not None:
+        return
+    _database_url = database_url
+    _engine = create_async_engine(database_url, pool_pre_ping=True)
+    _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+
+
+def async_session() -> AsyncSession:
+    """Open a session — same call shape as the old module-level
+    sessionmaker (`async with db.async_session() as session:`)."""
+    if _session_factory is None:
+        raise RuntimeError("db.configure(DATABASE_URL) must be called before using the database.")
+    return _session_factory()
+
+
+async def dispose() -> None:
+    """Close the engine's connection pool (lifespan teardown)."""
+    if _engine is not None:
+        await _engine.dispose()
 
 
 async def init_db() -> None:
-    # NOTE: create_all only creates tables that don't exist yet — it does
-    # NOT add new columns to a table that's already
-    # live in the database.
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """
+    Bring the database schema up to date by running Alembic migrations
+    (replaces the old create_all call, which could only CREATE missing
+    tables — it silently could not alter existing ones, which this
+    project got burned by more than once).
+    """
+    if _database_url is None:
+        raise RuntimeError("db.configure(DATABASE_URL) must be called before init_db().")
+    await asyncio.to_thread(_run_migrations, _database_url)
+
+
+def _run_migrations(database_url: str) -> None:
+    # Configured programmatically (script_location resolved relative to
+    # this package) so the migrations run identically from the Docker
+    # image, local dev, and the alembic CLI. Runs inside to_thread: the
+    # async env.py uses asyncio.run(), which needs a thread that has no
+    # event loop of its own.
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(cfg, "head")
 
 
 async def get_or_create_user(auth_provider_id: str, email: str) -> int:
@@ -139,11 +202,27 @@ async def get_or_create_user(auth_provider_id: str, email: str) -> int:
         existing = result.scalar_one_or_none()
         if existing is not None:
             return existing.id
-        new_user = User(auth_provider_id=auth_provider_id, email=email)
-        session.add(new_user)
+        # Two concurrent first-ever requests from the same new user can
+        # both reach here (both SELECTs saw nothing) — a plain INSERT
+        # would race, and the loser would blow up on the unique
+        # constraint. Same atomic upsert pattern as request_deep_analysis:
+        # whoever loses the race just reads the winner's row instead.
+        stmt = (
+            pg_insert(User)
+            .values(auth_provider_id=auth_provider_id, email=email)
+            .on_conflict_do_nothing(index_elements=["auth_provider_id"])
+            .returning(User.id)
+        )
+        new_id = (await session.execute(stmt)).scalar_one_or_none()
         await session.commit()
-        await session.refresh(new_user)
-        return new_user.id
+        if new_id is not None:
+            return new_id
+        winner_id = await session.scalar(
+            select(User.id).where(User.auth_provider_id == auth_provider_id)
+        )
+        if winner_id is None:
+            raise RuntimeError("User upsert failed unexpectedly.")
+        return winner_id
 
 
 async def create_conversation(user_id: int) -> int:
@@ -228,14 +307,27 @@ async def append_message(
         await session.commit()
 
 
-async def load_history(conversation_id: int, user_id: int) -> list[dict]:
+async def load_history(
+    conversation_id: int, user_id: int, max_messages: int | None = None
+) -> list[dict]:
+    """
+    A conversation's messages, oldest-first. `max_messages` returns only
+    the most RECENT n (still oldest-first) — the agent path caps what it
+    sends to Anthropic (token cost grows with every turn otherwise, until
+    old conversations overflow the context window entirely), while the UI
+    history endpoint passes None and shows everything.
+    """
     async with async_session() as session:
         await _check_ownership(session, conversation_id, user_id)
-        result = await session.execute(
+        stmt = (
             select(Message.role, Message.content, Message.projections, Message.news)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.id)
+            .order_by(Message.id.desc())
         )
+        if max_messages is not None:
+            stmt = stmt.limit(max_messages)
+        result = await session.execute(stmt)
+        rows = list(result.fetchall())[::-1]  # fetched newest-first; restore oldest-first
         return [
             {
                 "role": row.role,
@@ -243,7 +335,7 @@ async def load_history(conversation_id: int, user_id: int) -> list[dict]:
                 "projections": row.projections or [],
                 "news": row.news or [],
             }
-            for row in result.fetchall()
+            for row in rows
         ]
 
 
@@ -288,27 +380,40 @@ async def get_deep_analysis_job(job_id: int, user_id: int) -> dict:
         }
 
 
+# How stale a produce claim must be before another caller may steal it.
+# A produce attempt takes seconds (flush timeout is 3s), so 5 minutes
+# only ever matters when a claim holder CRASHED mid-produce — the case
+# the lease exists for. Server-side interval so the comparison uses the
+# database's clock, not whichever app server's.
+_PRODUCE_LEASE = text("interval '5 minutes'")
+
+
 async def claim_job_for_producing(job_id: int) -> bool:
     """
-    Atomically mark one job as claimed for producing to Kafka — returns True
-    only if THIS call is the one that flipped `produced` False -> True.
+    Atomically claim the right to produce one job's Kafka message — returns
+    True only if THIS call took the claim.
 
-    This exists because a job can be produced from two different places: the
-    original request handler's own synchronous attempt, and the background
-    produce-retry loop (see api.py) picking it up later. Without an atomic
-    claim, both could race to produce the same job at once, resulting in a
-    duplicate Kafka message for the same job_id. Whichever caller loses the
-    race (gets False back) must not attempt to produce at all.
-
-    If the actual produce attempt fails after successfully claiming here,
-    the caller must call release_job_for_producing so it's retried later —
-    claiming is not the same as succeeding.
+    Claiming is a LEASE (produce_claimed_at = now()), not a permanent flag:
+      - a rival caller inside the lease window loses the claim (returns
+        False) and must not produce — that's the duplicate-message guard
+        between the request handler and the retry loop;
+      - a claim older than the lease is presumed dead (its holder crashed
+        between claiming and producing — no exception ever fired, so
+        release was never called) and CAN be re-claimed. Without this,
+        a crash in that window left the job unproducible forever.
     """
     async with async_session() as session:
         result = await session.execute(
             sql_update(DeepAnalysisJob)
-            .where(DeepAnalysisJob.id == job_id, DeepAnalysisJob.produced.is_(False))
-            .values(produced=True)
+            .where(
+                DeepAnalysisJob.id == job_id,
+                DeepAnalysisJob.produced.is_(False),
+                or_(
+                    DeepAnalysisJob.produce_claimed_at.is_(None),
+                    DeepAnalysisJob.produce_claimed_at < func.now() - _PRODUCE_LEASE,
+                ),
+            )
+            .values(produce_claimed_at=func.now())
             .returning(DeepAnalysisJob.id)
         )
         claimed_id = result.scalar_one_or_none()
@@ -316,13 +421,65 @@ async def claim_job_for_producing(job_id: int) -> bool:
         return claimed_id is not None
 
 
-async def release_job_for_producing(job_id: int) -> None:
-    """Revert a claim after a produce attempt failed, so it's retried later."""
+async def mark_job_produced(job_id: int) -> None:
+    """Record confirmed Kafka delivery — only ever called after flush()
+    reported success, never optimistically."""
     async with async_session() as session:
-        job = await session.get(DeepAnalysisJob, job_id)
-        if job is not None:
-            job.produced = False
-            await session.commit()
+        await session.execute(
+            sql_update(DeepAnalysisJob).where(DeepAnalysisJob.id == job_id).values(produced=True)
+        )
+        await session.commit()
+
+
+async def release_job_for_producing(job_id: int) -> None:
+    """Give up a claim after a CONFIRMED produce failure, so the retry
+    loop can pick the job up again immediately (no lease wait)."""
+    async with async_session() as session:
+        await session.execute(
+            sql_update(DeepAnalysisJob)
+            .where(DeepAnalysisJob.id == job_id)
+            .values(produce_claimed_at=None)
+        )
+        await session.commit()
+
+
+# How long a job may sit in an in-flight status without a single commit
+# before it's presumed abandoned (its worker died mid-job). Every
+# set_status commit refreshes updated_at (onupdate), so a LIVE worker's
+# job never goes this long without a heartbeat — the longest real gap is
+# one fetching/summarizing phase, a few minutes at worst.
+_PROCESSING_LEASE = text("interval '10 minutes'")
+
+_IN_FLIGHT_STATUSES = (JobStatus.fetching, JobStatus.simulating, JobStatus.summarizing)
+
+
+async def claim_job_for_processing(job_id: int) -> bool:
+    """
+    Atomically claim a job for processing — returns True only if THIS
+    worker took it. The claim is the queued -> fetching transition itself
+    (compare-and-set on status), so two workers handed the same message
+    (consumer-group rebalance redelivering an uncommitted offset) can't
+    both walk the job through the state machine and double-spend the
+    Anthropic calls.
+
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            sql_update(DeepAnalysisJob)
+            .where(
+                DeepAnalysisJob.id == job_id,
+                or_(
+                    DeepAnalysisJob.status == JobStatus.queued,
+                    DeepAnalysisJob.status.in_(_IN_FLIGHT_STATUSES)
+                    & (DeepAnalysisJob.updated_at < func.now() - _PROCESSING_LEASE),
+                ),
+            )
+            .values(status=JobStatus.fetching, updated_at=func.now())
+            .returning(DeepAnalysisJob.id)
+        )
+        claimed_id = result.scalar_one_or_none()
+        await session.commit()
+        return claimed_id is not None
 
 
 async def list_unproduced_jobs() -> list[dict]:

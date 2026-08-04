@@ -9,7 +9,9 @@ import logging
 import time
 from os import getenv
 
+import cachecontrol
 import redis
+import requests
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.auth.transport import requests as google_auth_requests
@@ -24,6 +26,26 @@ if not GOOGLE_CLIENT_ID:
     raise RuntimeError("GOOGLE_CLIENT_ID must be set.")
 
 security = HTTPBearer()
+
+# Built ONCE, module-level — verify_oauth2_token uses this to fetch
+# Google's public signing certs, and a fresh Request() per call meant a
+# network round-trip to Google on every authenticated request. Google's
+# cert endpoint sends Cache-Control headers (~hours), which the
+# cachecontrol-wrapped session honors, so certs are refetched only when
+# they actually expire.
+_google_auth_session = cachecontrol.CacheControl(requests.Session())
+_google_auth_request = google_auth_requests.Request(session=_google_auth_session)
+
+# Short-TTL cache of already-verified tokens -> internal user id, so a
+# burst of requests from the same signed-in user (polling, rapid asks)
+# doesn't re-verify the same JWT and re-query the users table every
+# time. TTL is deliberately short: revocation/expiry still bites within
+# a minute, and the token's own exp was already checked when it entered
+# the cache. Evicted lazily; cleared outright if it somehow grows past
+# the cap (bounded memory beats LRU bookkeeping at this scale).
+_TOKEN_CACHE_TTL_SECONDS = 60
+_TOKEN_CACHE_MAX_ENTRIES = 1024
+_token_cache: dict[str, tuple[int, float]] = {}
 
 # Rate limiting by client IP — shared across every router, and registered
 # onto app.state in api.py's own setup.
@@ -41,11 +63,18 @@ async def get_current_user_id(
     never add a user_id field to AskRequest), since that would let any
     client simply claim to be any user.
     """
+    token = credentials.credentials
+    cached = _token_cache.get(token)
+    if cached is not None:
+        user_id, cached_at = cached
+        if time.time() - cached_at < _TOKEN_CACHE_TTL_SECONDS:
+            return user_id
+        del _token_cache[token]
     try:
         payload = await asyncio.to_thread(
             id_token.verify_oauth2_token,
-            credentials.credentials,
-            google_auth_requests.Request(),
+            token,
+            _google_auth_request,
             GOOGLE_CLIENT_ID,
         )
         user_id = await db.get_or_create_user(payload["sub"], payload["email"])
@@ -56,6 +85,9 @@ async def get_current_user_id(
         raise HTTPException(
             status_code=503, detail=("Unable to verify sign-in right now. Please try again later.")
         ) from e
+    if len(_token_cache) >= _TOKEN_CACHE_MAX_ENTRIES:
+        _token_cache.clear()
+    _token_cache[token] = (user_id, time.time())
     return user_id
 
 
@@ -112,11 +144,15 @@ async def enforce_rate_limit(request: Request, user_id: int = Depends(get_curren
     if the user has exceeded their rate limit.
     """
     script = request.app.state.rate_limit_script
-    allowed, time_left = await asyncio.to_thread(
-        script,
-        keys=[f"rate_limit:{user_id}"],
-        args=[RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_RATE, RATE_LIMIT_COST, time.time()],
-    )
+    try:
+        allowed, time_left = await asyncio.to_thread(
+            script,
+            keys=[f"rate_limit:{user_id}"],
+            args=[RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_RATE, RATE_LIMIT_COST, time.time()],
+        )
+    except redis.exceptions.RedisError:
+        logging.exception("Rate limit check failed (Redis unreachable) — failing open")
+        return
     if not allowed:
         raise HTTPException(
             status_code=429,

@@ -7,29 +7,25 @@ import asyncio
 import json
 import logging
 from os import getenv
-from pathlib import Path
 
 import redis
 from confluent_kafka import Consumer, Message, Producer
 
 from nba_projection_bot import agent, data, db, rag, simulation
+from nba_projection_bot.kafka_config import build_kafka_config
 
 STATS = ["points", "rebounds", "assists", "steals", "blocks", "threes"]
 
 MAX_JOB_RETRIES = 3
 
-KAFKA_BOOTSTRAP_SERVERS = getenv("KAFKA_SERVICE_URI")
-KAFKA_USERNAME = getenv("KAFKA_USERNAME")
-KAFKA_PASSWORD = getenv("KAFKA_PASSWORD")
-KAFKA_CA_CERT = getenv("KAFKA_CA_CERT")
 REDIS_URL = getenv("REDIS_URL")
-
-if not KAFKA_BOOTSTRAP_SERVERS or not KAFKA_USERNAME or not KAFKA_PASSWORD or not KAFKA_CA_CERT:
-    raise RuntimeError(
-        "KAFKA_SERVICE_URI, KAFKA_USERNAME, KAFKA_PASSWORD, and KAFKA_CA_CERT must all be set."
-    )
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL must be set.")
+DATABASE_URL = getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL must be set.")
+
+db.configure(DATABASE_URL)
 
 # One shared client for this process's whole lifetime — same reasoning as
 # api.py's lifespan (see DECISIONS.md), just constructed at module level
@@ -37,28 +33,13 @@ if not REDIS_URL:
 _redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 redis_resources = data.build_redis_resources(_redis_client)
 
-_ca_cert_path = Path(__file__).parent / "kafka_ca.pem"
-_ca_cert_path.write_text(KAFKA_CA_CERT)
+_kafka_config = build_kafka_config()
 
-dlq_producer = Producer(
-    {
-        "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "SCRAM-SHA-256",
-        "sasl.username": KAFKA_USERNAME,
-        "sasl.password": KAFKA_PASSWORD,
-        "ssl.ca.location": str(_ca_cert_path),
-    }
-)
+dlq_producer = Producer(_kafka_config)
 
 consumer = Consumer(
     {
-        "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "SCRAM-SHA-256",
-        "sasl.username": KAFKA_USERNAME,
-        "sasl.password": KAFKA_PASSWORD,
-        "ssl.ca.location": str(_ca_cert_path),
+        **_kafka_config,
         "group.id": "deep-analysis-workers",
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
@@ -99,7 +80,9 @@ async def send_to_dead_letter(key: str, payload: dict) -> None:
             value=json.dumps(payload).encode("utf-8"),
             on_delivery=_delivery_report,
         )
-        dlq_producer.flush(timeout=10)
+        pending = dlq_producer.flush(timeout=10)
+        if pending > 0:
+            logging.error(f"DLQ delivery timed out for key {key} ({pending} message(s) pending)")
 
     await asyncio.to_thread(_produce)
 
@@ -121,10 +104,27 @@ async def process_job(job_id: int) -> None:
             logging.info(f"Job {job_id} already {job.status.value}, skipping redelivered message")
             return
 
+        # Atomic claim (queued -> fetching compare-and-set, or a stale
+        # in-flight job whose worker died). The terminal check above only
+        # guards FINISHED jobs — without this, a rebalance-redelivered
+        # message could put two workers on the same in-flight job
+        # concurrently, double-spending the Anthropic calls.
+        claimed = await db.claim_job_for_processing(job_id)
+        if not claimed:
+            logging.info(
+                f"Job {job_id} is being processed elsewhere (live claim), skipping duplicate"
+            )
+            return
+
         for attempt in range(MAX_JOB_RETRIES):
             try:
                 await set_status(session, job, db.JobStatus.fetching)
-                stats = data.get_full_season_stats(redis_resources, job.player_name, STATS)
+                # to_thread like every other blocking call here — this one
+                # can block for minutes (nba_api retries, plus data.py's
+                # cache-lock wait), which would freeze the event loop.
+                stats = await asyncio.to_thread(
+                    data.get_full_season_stats, redis_resources, job.player_name, STATS
+                )
 
                 await set_status(session, job, db.JobStatus.simulating)
                 simulated_stats = _project_multiple_stats(stats)
@@ -134,8 +134,8 @@ async def process_job(job_id: int) -> None:
                 summary = await agent.generate_report(simulated_stats, news)
 
                 job.result = summary
-                await set_status(session, job, db.JobStatus.done)
                 job.error = None
+                await set_status(session, job, db.JobStatus.done)
                 return
             except Exception as e:
                 job.error = str(e)

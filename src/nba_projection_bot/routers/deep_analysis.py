@@ -67,7 +67,7 @@ async def request_deep_analysis(
                     player_id=player_id,
                     status=db.JobStatus.queued.value,
                 )
-                .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                .on_conflict_do_nothing(index_elements=["user_id", "idempotency_key"])
                 .returning(db.DeepAnalysisJob.id)
             )
             result = await session.execute(stmt)
@@ -85,6 +85,7 @@ async def request_deep_analysis(
                 if claimed:
                     try:
                         await kafka_producer.produce_job_event(job_id, player_id=player_id)
+                        await db.mark_job_produced(job_id)
                     except Exception:
                         # Not fatal to the request: the job row exists and
                         # correctly reflects "not yet produced" once
@@ -101,7 +102,11 @@ async def request_deep_analysis(
             else:
                 existing = await session.scalar(
                     select(db.DeepAnalysisJob).where(
-                        db.DeepAnalysisJob.idempotency_key == idempotency_key
+                        db.DeepAnalysisJob.idempotency_key == idempotency_key,
+                        # Scoped to this user — with per-user key
+                        # uniqueness, the conflict can only ever be with
+                        # this user's own earlier submission.
+                        db.DeepAnalysisJob.user_id == user_id,
                     )
                 )
                 if existing is None:

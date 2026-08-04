@@ -54,13 +54,27 @@ RETRY_BASE_DELAY_SECONDS = 1.0
 # proxy URL, e.g. "http://user:pass@host:port".
 NBA_API_PROXY = getenv("NBA_API_PROXY")
 
-_today = date.today()
-_season_start_year = _today.year if _today.month >= 11 else _today.year - 1
-CURRENT_SEASON = f"{_season_start_year}-{str(_season_start_year + 1)[-2:]}"
+def current_season() -> str:
+    """
+    The season string for today's date, e.g. "2025-26". Computed per call,
+    not at import — a long-lived process that crosses the Nov 1 season
+    rollover must not keep serving last season forever.
+    """
+    today = date.today()
+    start_year = today.year if today.month >= 11 else today.year - 1
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
 
 LOCK_TTL_MS = 120000
 POLL_INTERVAL_SECONDS = 0.2
-MAX_WAIT_SECONDS = 130
+# How long a WAITER polls for the lock holder's cache write before giving
+# up. Deliberately much shorter than LOCK_TTL_MS (which bounds the
+# HOLDER's fetch): each waiter pins a thread-pool thread for its whole
+# wait (the poll loop runs inside asyncio.to_thread), and a wait longer
+# than the platform's gateway timeout (~100s on Render) would just get
+# the request killed upstream anyway. A holder's fetch normally completes
+# in seconds; 30s covers the slow tail, and past that the waiter's
+# "still loading, try again" error beats silently eating a thread.
+MAX_WAIT_SECONDS = 30
 
 _RELEASE_LOCK_SCRIPT_SOURCE = """
     if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -227,14 +241,17 @@ def get_recent_stats(
     player_name: str,
     stats: list[str],
     n_games: int = 15,
-    season: str = CURRENT_SEASON,
+    season: str | None = None,
 ) -> dict[str, list[int]]:
     """
     Return a player's values for each stat in `stats` over their most recent
-    `n_games`, combining regular season and playoff games.
+    `n_games`, combining regular season and playoff games. `season` defaults
+    to the current season (resolved per call — see current_season()).
 
     Raises ValueError if a stat is unsupported or the player isn't found.
     """
+    if season is None:
+        season = current_season()
     stats = [s.lower() for s in stats]
     unknown = [s for s in stats if s not in STAT_COLUMNS]
     if unknown:
@@ -252,7 +269,7 @@ def get_recent_stats(
     # season (even with playoffs) contains, e.g. a long-career player's request
     # for more games than they played that season.
     values: dict[str, list[int]] = {stat: [] for stat in stats}
-    current_season = season
+    season_cursor = season
     while len(values[stats[0]]) < n_games:
         found_this_season = False
         season_types = (
@@ -263,7 +280,7 @@ def get_recent_stats(
         for season_type in season_types:
             if len(values[stats[0]]) >= n_games:
                 break  # playoffs alone covered it — skip the regular-season call
-            df = _fetch_game_log(redis_resources, player_id, current_season, season_type)
+            df = _fetch_game_log(redis_resources, player_id, season_cursor, season_type)
             found_this_season = found_this_season or not df.empty
             remaining = n_games - len(values[stats[0]])
             sliced = df.head(remaining)
@@ -272,7 +289,7 @@ def get_recent_stats(
 
         if not found_this_season:
             break  # no data this season or earlier — before the player's career
-        current_season = _season_before(current_season)
+        season_cursor = _season_before(season_cursor)
 
     if not values[stats[0]]:
         raise ValueError(f"No games found for {player_name} in or before {season}")
@@ -284,14 +301,17 @@ def get_full_season_stats(
     redis_resources: RedisResources,
     player_name: str,
     stats: list[str],
-    season: str = CURRENT_SEASON,
+    season: str | None = None,
 ) -> dict[str, list[int]]:
     """
     Returns a player's values for each stat in 'stats'
-    for the current or last finished season.
+    for the current or last finished season. `season` defaults to the
+    current season (resolved per call — see current_season()).
 
     Raises ValueError if a stat is unsupported or the player isn't found.
     """
+    if season is None:
+        season = current_season()
     stats = [s.lower() for s in stats]
     unknown = [s for s in stats if s not in STAT_COLUMNS]
     if unknown:
