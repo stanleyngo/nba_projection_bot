@@ -9,6 +9,7 @@ import logging
 from os import getenv
 from pathlib import Path
 
+import redis
 from confluent_kafka import Consumer, Message, Producer
 
 from nba_projection_bot import agent, data, db, rag, simulation
@@ -21,11 +22,20 @@ KAFKA_BOOTSTRAP_SERVERS = getenv("KAFKA_SERVICE_URI")
 KAFKA_USERNAME = getenv("KAFKA_USERNAME")
 KAFKA_PASSWORD = getenv("KAFKA_PASSWORD")
 KAFKA_CA_CERT = getenv("KAFKA_CA_CERT")
+REDIS_URL = getenv("REDIS_URL")
 
 if not KAFKA_BOOTSTRAP_SERVERS or not KAFKA_USERNAME or not KAFKA_PASSWORD or not KAFKA_CA_CERT:
     raise RuntimeError(
         "KAFKA_SERVICE_URI, KAFKA_USERNAME, KAFKA_PASSWORD, and KAFKA_CA_CERT must all be set."
     )
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL must be set.")
+
+# One shared client for this process's whole lifetime — same reasoning as
+# api.py's lifespan (see DECISIONS.md), just constructed at module level
+# here since worker.py has no equivalent startup hook.
+_redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+redis_resources = data.build_redis_resources(_redis_client)
 
 _ca_cert_path = Path(__file__).parent / "kafka_ca.pem"
 _ca_cert_path.write_text(KAFKA_CA_CERT)
@@ -114,7 +124,7 @@ async def process_job(job_id: int) -> None:
         for attempt in range(MAX_JOB_RETRIES):
             try:
                 await set_status(session, job, db.JobStatus.fetching)
-                stats = data.get_full_season_stats(job.player_name, STATS)
+                stats = data.get_full_season_stats(redis_resources, job.player_name, STATS)
 
                 await set_status(session, job, db.JobStatus.simulating)
                 simulated_stats = _project_multiple_stats(stats)

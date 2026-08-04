@@ -271,8 +271,17 @@ def main(argv: list[str] | None = None) -> None:
     # Live CLI — requires nba_api and network access. Pull a long game history so
     # the walk-forward has enough games, then compare the two engines.
     import argparse
+    from os import getenv
+
+    import redis
 
     import nba_projection_bot.data as data
+
+    redis_url = getenv("REDIS_URL")
+    if not redis_url:
+        raise RuntimeError("REDIS_URL must be set.")
+    redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+    redis_resources = data.build_redis_resources(redis_client)
 
     parser = argparse.ArgumentParser(
         description="Backtest the projection engine against a real player's game log."
@@ -323,7 +332,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.combo:
         recent = data.get_recent_stats(
-            args.player, args.combo, n_games=args.n_games, season=args.season
+            redis_resources, args.player, args.combo, n_games=args.n_games, season=args.season
         )
         # data returns most-recent-first; the walk-forward wants oldest-first.
         chronological_combo = {s.lower(): list(reversed(recent[s.lower()])) for s in args.combo}
@@ -335,7 +344,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     else:
         recent = data.get_recent_stats(
-            args.player, [args.stat], n_games=args.n_games, season=args.season
+            redis_resources, args.player, [args.stat], n_games=args.n_games, season=args.season
         )
         # data returns most-recent-first; the walk-forward wants oldest-first.
         chronological_single = list(reversed(recent[args.stat.lower()]))

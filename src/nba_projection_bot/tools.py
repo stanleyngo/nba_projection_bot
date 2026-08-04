@@ -3,12 +3,24 @@ tools.py: wrap data.py / simulation.py as Anthropic tool-use tools.
 """
 
 import asyncio
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import nba_projection_bot.data as data
 import nba_projection_bot.rag as rag
 import nba_projection_bot.simulation as simulation
+
+# Tools that need the shared Redis client — bound in once at startup via
+# bind_redis_resources, not passed through call_tool's own signature. The
+# model only ever supplies tool_input (player_name, stat, etc.); it has no
+# concept of application-level dependencies like a Redis client, and
+# call_tool shouldn't need one either just to pass it through.
+_REDIS_DEPENDENT_TOOLS = (
+    "get_player_recent_stats",
+    "project_stat_over_line",
+    "project_combo_over_line",
+)
 
 
 @dataclass
@@ -100,8 +112,12 @@ def get_tool_schemas() -> list[dict]:
         "required": ["player_name", "stats"],
     },
 )
-async def get_player_recent_stats(player_name: str, stats: list[str], n_games: int = 15) -> dict:
-    return await asyncio.to_thread(data.get_recent_stats, player_name, stats, n_games=n_games)
+async def get_player_recent_stats(
+    redis_resources: data.RedisResources, player_name: str, stats: list[str], n_games: int = 15
+) -> dict:
+    return await asyncio.to_thread(
+        data.get_recent_stats, redis_resources, player_name, stats, n_games=n_games
+    )
 
 
 @register_tool(
@@ -153,6 +169,7 @@ async def get_player_recent_stats(player_name: str, stats: list[str], n_games: i
     },
 )
 async def project_stat_over_line(
+    redis_resources: data.RedisResources,
     player_name: str,
     stat: str,
     line: float | None = None,
@@ -160,7 +177,7 @@ async def project_stat_over_line(
     injury_status: str | None = None,
 ) -> dict:
     values_dict = await asyncio.to_thread(
-        data.get_recent_stats, player_name, [stat], n_games=n_games
+        data.get_recent_stats, redis_resources, player_name, [stat], n_games=n_games
     )
     values = values_dict[stat.lower()]
     return simulation.project_stat(values, line, injury_status=injury_status)
@@ -221,6 +238,7 @@ async def project_stat_over_line(
     },
 )
 async def project_combo_over_line(
+    redis_resources: data.RedisResources,
     player_name: str,
     stats: list[str],
     line: float | None = None,
@@ -228,7 +246,7 @@ async def project_combo_over_line(
     injury_status: str | None = None,
 ) -> dict:
     values_dict = await asyncio.to_thread(
-        data.get_recent_stats, player_name, stats, n_games=n_games
+        data.get_recent_stats, redis_resources, player_name, stats, n_games=n_games
     )
     return simulation.project_combo_stat(values_dict, line, injury_status=injury_status)
 
@@ -259,6 +277,21 @@ async def get_player_news_context(player_name: str) -> dict:
     return await rag.get_relevant_context(player_name)
 
 
+def bind_redis_resources(redis_resources: data.RedisResources) -> None:
+    """
+    Call once, at process startup (see api.py's lifespan), after every
+    @register_tool call has already run at import time. Pre-binds the
+    shared Redis client into each tool function that needs one, via
+    functools.partial, so call_tool's own dispatch never has to know about
+    it — it just keeps calling TOOL_REGISTRY[name].function(**tool_input)
+    exactly as before, and the bound functions already have redis_resources
+    as their first positional argument baked in.
+    """
+    for name in _REDIS_DEPENDENT_TOOLS:
+        entry = TOOL_REGISTRY[name]
+        entry.function = functools.partial(entry.function, redis_resources)
+
+
 async def call_tool(name: str, tool_input: dict) -> dict:
     if name not in TOOL_REGISTRY:
         raise ValueError(f"Unrecognized tool name: {name}")
@@ -267,6 +300,15 @@ async def call_tool(name: str, tool_input: dict) -> dict:
 
 if __name__ == "__main__":
     import json
+    from os import getenv
+
+    import redis
+
+    _redis_url = getenv("REDIS_URL")
+    if not _redis_url:
+        raise RuntimeError("REDIS_URL must be set.")
+    _redis_client = redis.Redis.from_url(_redis_url, decode_responses=True)
+    bind_redis_resources(data.build_redis_resources(_redis_client))
 
     schemas = get_tool_schemas()
     print("registered tool schemas:", json.dumps(schemas, indent=2))
