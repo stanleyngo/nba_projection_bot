@@ -306,10 +306,19 @@ def simulate_combo_stat(
 if __name__ == "__main__":
     # Stage 2 checkpoint. Imported lazily so the engine itself has no dependency
     # on the data layer (and therefore on nba_api) — only this demo does.
+    from os import getenv
+
+    import redis
+
     import nba_projection_bot.data as data
 
+    _redis_url = getenv("REDIS_URL")
+    if not _redis_url:
+        raise RuntimeError("REDIS_URL must be set.")
+    _redis_client = redis.Redis.from_url(_redis_url, decode_responses=True)
+    _redis_resources = data.build_redis_resources(_redis_client)
     recent = data.get_recent_stats(
-        "Jokic", ["points", "rebounds", "assists"], n_games=15, season="2025-26"
+        _redis_resources, "Jokic", ["points", "rebounds", "assists"], n_games=15, season="2025-26"
     )
     points = recent["points"]
     observed_max = max(points)

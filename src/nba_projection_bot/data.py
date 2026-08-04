@@ -13,6 +13,7 @@ import io
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from os import getenv
 from zoneinfo import ZoneInfo
@@ -61,27 +62,46 @@ LOCK_TTL_MS = 120000
 POLL_INTERVAL_SECONDS = 0.2
 MAX_WAIT_SECONDS = 130
 
-REDIS_URL = getenv("REDIS_URL")
-if not REDIS_URL:
-    raise RuntimeError("Invalid or no Redis URL found.")
-
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-
-release_lock_script = redis_client.register_script("""
+_RELEASE_LOCK_SCRIPT_SOURCE = """
     if redis.call('GET', KEYS[1]) == ARGV[1] then
         return redis.call('DEL', KEYS[1])
     else
         return 0
     end
-""")
+"""
+
+
+@dataclass
+class RedisResources:
+    client: redis.Redis
+    release_lock_script: redis.commands.core.Script
+
+
+def build_redis_resources(client: redis.Redis) -> RedisResources:
+    """
+    Register this module's own Lua script against an already-built client
+    — called once, at process startup (see api.py's lifespan / worker.py's
+    module-level setup), not per-call. The client itself is built by each
+    process's own entry point, not here: it's shared infrastructure other
+    modules (e.g. dependencies.py's rate limiter) also register their own
+    scripts against, so construction shouldn't be bundled inside one
+    module's builder. Every function below that needs Redis receives the
+    resulting RedisResources instead of reaching for a module-level global:
+    this module has no hidden dependency on Redis existing until something
+    explicitly hands it one, which makes it easy to substitute a fake for
+    tests, and means construction/teardown lives in one deliberate place
+    instead of being an implicit side effect of import order.
+    """
+    release_lock_script = client.register_script(_RELEASE_LOCK_SCRIPT_SOURCE)
+    return RedisResources(client=client, release_lock_script=release_lock_script)
 
 
 def _cache_key(player_id: int, season: str, season_type: str) -> str:
     return f"nba:gamelog:{player_id}:{season}:{season_type}"
 
 
-def _release_lock(lock_key: str, token: str) -> bool:
-    return release_lock_script(keys=[lock_key], args=[token])
+def _release_lock(redis_resources: RedisResources, lock_key: str, token: str) -> bool:
+    return redis_resources.release_lock_script(keys=[lock_key], args=[token])
 
 
 # expiring cache at 2am EST because all games are basically guaranteed
@@ -121,7 +141,9 @@ def _fetch_from_nba_api(player_id: int, season: str, season_type: str) -> pd.Dat
             time.sleep(RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
 
 
-def _fetch_game_log(player_id: int, season: str, season_type: str) -> pd.DataFrame:
+def _fetch_game_log(
+    redis_resources: RedisResources, player_id: int, season: str, season_type: str
+) -> pd.DataFrame:
     """
     Fetch a player's stats for an entire season from cache, or fetch from
     nba_api and cache it if not yet in cache. If Redis itself is
@@ -130,29 +152,37 @@ def _fetch_game_log(player_id: int, season: str, season_type: str) -> pd.DataFra
     """
     try:
         key = _cache_key(player_id, season, season_type)
-        cached = redis_client.get(key)
+        cached = redis_resources.client.get(key)
         if cached is not None:
             assert isinstance(cached, str)  # guaranteed by decode_responses=True
             return pd.read_json(io.StringIO(cached))
 
         lock_key = f"lock:{key}"
         token = str(uuid.uuid4())
-        acquired = redis_client.set(lock_key, token, nx=True, px=LOCK_TTL_MS)
+        acquired = redis_resources.client.set(lock_key, token, nx=True, px=LOCK_TTL_MS)
 
         if acquired:
             try:
                 df = _fetch_from_nba_api(player_id, season, season_type)
-                redis_client.set(key, df.to_json(), ex=_seconds_until_next_2am_est())
+                redis_resources.client.set(key, df.to_json(), ex=_seconds_until_next_2am_est())
                 return df
             finally:
-                _release_lock(lock_key, token)
+                _release_lock(redis_resources, lock_key, token)
         else:
             deadline = time.monotonic() + MAX_WAIT_SECONDS
             while time.monotonic() < deadline:
-                cached = redis_client.get(key)
+                cached = redis_resources.client.get(key)
                 if cached is not None:
                     assert isinstance(cached, str)  # guaranteed by decode_responses=True
                     return pd.read_json(io.StringIO(cached))
+                if not redis_resources.client.exists(lock_key):
+                    # The holder released the lock without ever populating
+                    # the cache — it failed (e.g. nba_api errored out after
+                    # its own retries), it didn't just finish. Waiting out
+                    # the rest of the deadline for a cache entry that's
+                    # never coming would be pointless, so fetch directly
+                    # instead, same fallback as the RedisError case below.
+                    return _fetch_from_nba_api(player_id, season, season_type)
                 time.sleep(POLL_INTERVAL_SECONDS)
             raise ValueError("Player data is still loading, please try again later.")
     except redis.exceptions.RedisError:
@@ -193,6 +223,7 @@ def resolve_player_id(player_name: str) -> int | None:
 
 
 def get_recent_stats(
+    redis_resources: RedisResources,
     player_name: str,
     stats: list[str],
     n_games: int = 15,
@@ -232,7 +263,7 @@ def get_recent_stats(
         for season_type in season_types:
             if len(values[stats[0]]) >= n_games:
                 break  # playoffs alone covered it — skip the regular-season call
-            df = _fetch_game_log(player_id, current_season, season_type)
+            df = _fetch_game_log(redis_resources, player_id, current_season, season_type)
             found_this_season = found_this_season or not df.empty
             remaining = n_games - len(values[stats[0]])
             sliced = df.head(remaining)
@@ -250,6 +281,7 @@ def get_recent_stats(
 
 
 def get_full_season_stats(
+    redis_resources: RedisResources,
     player_name: str,
     stats: list[str],
     season: str = CURRENT_SEASON,
@@ -276,7 +308,7 @@ def get_full_season_stats(
         SeasonTypePlayoffs.regular,
     )
     for season_type in season_types:
-        df = _fetch_game_log(player_id, season, season_type)
+        df = _fetch_game_log(redis_resources, player_id, season, season_type)
         for stat in stats:
             values[stat].extend(int(v) for v in df[STAT_COLUMNS[stat]])
 
@@ -287,6 +319,13 @@ def get_full_season_stats(
 
 
 if __name__ == "__main__":
-    recent = get_recent_stats("Jokic", ["points", "rebounds"], n_games=15, season="2025-26")
+    _redis_url = getenv("REDIS_URL")
+    if not _redis_url:
+        raise RuntimeError("REDIS_URL must be set.")
+    _redis_client = redis.Redis.from_url(_redis_url, decode_responses=True)
+    _redis_resources = build_redis_resources(_redis_client)
+    recent = get_recent_stats(
+        _redis_resources, "Jokic", ["points", "rebounds"], n_games=15, season="2025-26"
+    )
     print("Recent points:", recent)
     print("Games returned:", len(recent.get("points", [])))
