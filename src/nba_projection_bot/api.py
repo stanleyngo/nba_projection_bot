@@ -9,7 +9,7 @@ schemas.py (request/response models) for everything this file delegates to.
 """
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from os import getenv
 from pathlib import Path
 
@@ -31,12 +31,17 @@ from nba_projection_bot.routers import chat, deep_analysis
 REDIS_URL = getenv("REDIS_URL")
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL must be set.")
+DATABASE_URL = getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL must be set.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # narrowed above; mypy can't see across function scopes
+    assert REDIS_URL is not None and DATABASE_URL is not None
+    db.configure(DATABASE_URL)
     await db.init_db()
-    assert REDIS_URL is not None  # narrowed above; mypy can't see across function scopes
     # Built once here, not as a data.py module-level singleton — see
     # DECISIONS.md for the reasoning (testability, centralized
     # construction/teardown, no import-order side effects). The raw client
@@ -54,6 +59,10 @@ async def lifespan(app: FastAPI):
     retry_task = asyncio.create_task(kafka_producer.retry_unproduced_jobs())
     yield
     retry_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await retry_task
+    redis_client.close()
+    await db.dispose()
 
 
 app = FastAPI(lifespan=lifespan)

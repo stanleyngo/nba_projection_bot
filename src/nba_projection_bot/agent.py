@@ -25,6 +25,7 @@ load_dotenv()
 MODEL = "claude-sonnet-4-5"
 MAX_TOKENS = 2048
 MAX_TOOL_ITERATIONS = 7
+MAX_HISTORY_MESSAGES = 30
 
 # The projection-family tools whose results the UI renders as visual cards.
 # web_search and recent_stats produce prose/raw context, not a card, so they're
@@ -199,8 +200,14 @@ async def run_agent(
     is_new_conversation = conversation_id is None
     if conversation_id is None:
         conversation_id = await db.create_conversation(user_id)
-    history = await db.load_history(conversation_id, user_id)
-    messages = history + [{"role": "user", "content": user_message}]
+    history = await db.load_history(conversation_id, user_id, max_messages=MAX_HISTORY_MESSAGES)
+    # load_history rows also carry projections/news for the UI's cards —
+    # the Anthropic API rejects unknown message fields outright
+    # (400: "Extra inputs are not permitted"), so only role/content may
+    # ever be sent to it.
+    messages = [{"role": m["role"], "content": m["content"]} for m in history] + [
+        {"role": "user", "content": user_message}
+    ]
     projections: list[dict] = []
     news: list[dict] = []
     for _ in range(MAX_TOOL_ITERATIONS):
@@ -269,7 +276,15 @@ async def run_agent(
                             "content": json.dumps(result),
                         }
                     )
-                except (ValueError, TypeError) as e:
+                except Exception as e:
+                    # ANY tool failure becomes an is_error tool_result
+                    # rather than failing the whole turn — the most likely
+                    # real failures here are flaky upstreams (nba_api
+                    # timeouts, Tavily/Voyage errors), and the model
+                    # handles "this tool failed, here's why" gracefully,
+                    # which beats a blanket 500 for the user. (Exception
+                    # doesn't catch CancelledError, so shutdown still
+                    # propagates.)
                     logging.exception(f"Tool call failed: {block.name}({block.input!r})")
                     tool_results.append(
                         {
@@ -287,6 +302,12 @@ async def run_agent(
 
 
 if __name__ == "__main__":
+    from os import getenv
+
+    _database_url = getenv("DATABASE_URL")
+    if not _database_url:
+        raise RuntimeError("DATABASE_URL must be set.")
+    db.configure(_database_url)
     answer, conversation_id, projections, news = asyncio.run(
         run_agent("What's Nikola Jokic projected for against a 25.5 point line?", user_id=1)
     )

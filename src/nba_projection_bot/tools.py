@@ -289,6 +289,11 @@ def bind_redis_resources(redis_resources: data.RedisResources) -> None:
     """
     for name in _REDIS_DEPENDENT_TOOLS:
         entry = TOOL_REGISTRY[name]
+        if isinstance(entry.function, functools.partial):
+            # Already bound — a second call (tests, re-entered lifespan)
+            # must not nest another partial, which would pass
+            # redis_resources twice and TypeError on every dispatch.
+            continue
         entry.function = functools.partial(entry.function, redis_resources)
 
 

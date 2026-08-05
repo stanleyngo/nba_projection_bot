@@ -8,38 +8,13 @@ DECISIONS.md for the reasoning behind the retry-loop design.
 import asyncio
 import json
 import logging
-from os import getenv
-from pathlib import Path
 
 from confluent_kafka import Producer
 
 import nba_projection_bot.db as db
+from nba_projection_bot.kafka_config import build_kafka_config
 
-KAFKA_BOOTSTRAP_SERVERS = getenv("KAFKA_SERVICE_URI")
-KAFKA_USERNAME = getenv("KAFKA_USERNAME")
-KAFKA_PASSWORD = getenv("KAFKA_PASSWORD")
-KAFKA_CA_CERT = getenv("KAFKA_CA_CERT")  # PEM content, not a file path
-if not KAFKA_BOOTSTRAP_SERVERS or not KAFKA_USERNAME or not KAFKA_PASSWORD or not KAFKA_CA_CERT:
-    raise RuntimeError(
-        "KAFKA_SERVICE_URI, KAFKA_USERNAME, KAFKA_PASSWORD, and KAFKA_CA_CERT must all be set."
-    )
-
-# ssl.ca.location needs an actual file path — write the PEM content out
-# once at import time rather than requiring a file to already exist on
-# disk in every environment this runs in (local, Render, etc.).
-_ca_cert_path = Path(__file__).parent / "kafka_ca.pem"
-_ca_cert_path.write_text(KAFKA_CA_CERT)
-
-producer = Producer(
-    {
-        "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "SCRAM-SHA-256",
-        "sasl.username": KAFKA_USERNAME,
-        "sasl.password": KAFKA_PASSWORD,
-        "ssl.ca.location": str(_ca_cert_path),
-    }
-)
+producer = Producer(build_kafka_config())
 
 PRODUCE_RETRY_INTERVAL_SECONDS = 300
 
@@ -112,9 +87,14 @@ async def retry_unproduced_jobs() -> None:
                     continue
                 claimed = await db.claim_job_for_producing(job["id"])
                 if not claimed:
-                    continue  # the original request handler already got to it
+                    # Someone else holds a live claim on it (the request
+                    # handler, or a previous loop iteration still in
+                    # flight) — or the claim is stale but not yet past
+                    # the lease. Either way, not ours this round.
+                    continue
                 try:
                     await produce_job_event(job["id"], player_id=job["player_id"])
+                    await db.mark_job_produced(job["id"])
                     logging.info(f"Produce-retry succeeded for deep-analysis job {job['id']}")
                 except Exception:
                     logging.exception(f"Produce-retry failed for job {job['id']}, will retry again")

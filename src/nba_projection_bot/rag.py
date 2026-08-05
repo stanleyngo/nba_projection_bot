@@ -89,6 +89,12 @@ def chunk_article(article: dict, chunk_size: int = 500) -> list[dict]:
 async def embed_texts(texts: list[str], input_type: str) -> list[np.ndarray]:
     """Call Voyage's embedding endpoint on a batch of strings at once
     and return one numpy vector per input string."""
+    # Voyage rejects an empty input list outright (InvalidRequestError —
+    # verified live), and since that's a VoyageError subclass the retry
+    # loop below would pointlessly retry a permanent error 3 times before
+    # raising. Nothing to embed is a valid input here, not an error.
+    if not texts:
+        return []
     for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
         try:
             embeddings = await voyage_client.embed(
@@ -135,6 +141,12 @@ async def get_relevant_context(player_name: str, k_per_category: int = 2) -> dic
     analysis_query = f"analyst opinion about {player_name} NBA"
 
     chunk_texts = [c["text"] for c in news_chunks] + [c["text"] for c in analysis_chunks]
+    if not chunk_texts:
+        # Tavily found nothing at all for this player — skip the embedding
+        # round-trips entirely (there's nothing to rank the queries
+        # against). Empty lists are the expected "no coverage" result the
+        # callers already handle, not an error.
+        return {"news": [], "analysis": []}
     chunk_vectors, query_vectors = await asyncio.gather(
         embed_texts(chunk_texts, input_type="document"),
         embed_texts([news_query, analysis_query], input_type="query"),
